@@ -35,9 +35,32 @@ def _encode_image_base64(file_path: str) -> str | None:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def _build_api_kwargs(model: str, content: list[dict]) -> dict:
+    """Build OpenAI API kwargs based on model type."""
+    api_kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+    }
+
+    if model.startswith("o"):
+        # o-series reasoning models (o1, o3, o4-mini, etc.)
+        # - no temperature support
+        # - use max_completion_tokens instead of max_tokens
+        api_kwargs["max_completion_tokens"] = 4096
+    else:
+        # gpt-series models (gpt-4o-mini, gpt-4o, gpt-4-turbo, etc.)
+        api_kwargs["max_tokens"] = 2048
+        api_kwargs["temperature"] = 0.1
+
+    return api_kwargs
+
+
 async def _call_openai(photos: list) -> list:
     """Call OpenAI Vision API with all session photos."""
     from openai import OpenAI
+
+    model = settings.openai_model
+    logger.info("Calling OpenAI model=%s with %d photos", model, len(photos))
 
     client = OpenAI(api_key=settings.openai_api_key)
     prompt = _load_prompt()
@@ -58,35 +81,20 @@ async def _call_openai(photos: list) -> list:
         })
 
     if len(content) <= 1:
-        # No valid photos to analyze
+        logger.warning("No valid photos to analyze")
         return []
 
-    # o4-mini uses max_completion_tokens instead of max_tokens,
-    # and does not support the temperature parameter
-    api_kwargs: dict = {
-        "model": settings.openai_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": content,
-            }
-        ],
-    }
-    if settings.openai_model.startswith("o"):
-        api_kwargs["max_completion_tokens"] = 2048
-    else:
-        api_kwargs["max_tokens"] = 1024
-        api_kwargs["temperature"] = 0.1
+    api_kwargs = _build_api_kwargs(model, content)
+    logger.info("OpenAI request: model=%s, photos=%d", model, len(content) - 1)
 
     response = client.chat.completions.create(**api_kwargs)
 
     raw_text = response.choices[0].message.content or ""
-    logger.info("OpenAI raw response: %s", raw_text)
+    logger.info("OpenAI raw response (%d chars): %s", len(raw_text), raw_text[:500])
 
     # Parse JSON from response (handle markdown code blocks)
     json_text = raw_text.strip()
     if json_text.startswith("```"):
-        # Remove ```json ... ``` wrapper
         lines = json_text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         json_text = "\n".join(lines)
@@ -110,6 +118,7 @@ async def _call_openai(photos: list) -> list:
         else:
             logger.warning("Skipping invalid damage entry: %s", d)
 
+    logger.info("OpenAI analysis: %d damages validated out of %d returned", len(validated), len(damages))
     return validated
 
 
@@ -139,16 +148,21 @@ async def analyze_session(session_id: str) -> None:
                 await db_session.commit()
                 return
 
-            # Use real OpenAI if API key is configured, otherwise mock
-            if settings.openai_api_key:
-                try:
-                    damage_list = await _call_openai(photos)
-                except Exception as e:
-                    logger.exception("OpenAI call failed, falling back to mock: %s", e)
-                    damage_list = _mock_analysis(photos)
-            else:
-                logger.info("No OpenAI API key configured, using mock analysis")
-                damage_list = _mock_analysis(photos)
+            if not settings.openai_api_key:
+                # No API key = error, not silent mock
+                logger.error("OPENAI_API_KEY not configured — cannot analyze session %s", session_id)
+                analysis.status = "error"
+                analysis.raw_response = json.dumps({"error": "OPENAI_API_KEY not configured"})
+                await db_session.commit()
+
+                sess = await db_session.get(Session, session_id)
+                if sess and sess.status == "uploaded":
+                    sess.status = "completed"
+                    await db_session.commit()
+                return
+
+            # Call OpenAI — NO silent fallback to mock
+            damage_list = await _call_openai(photos)
 
             # Save damages
             for damage_data in damage_list:
@@ -165,39 +179,16 @@ async def analyze_session(session_id: str) -> None:
             analysis.status = "completed"
             analysis.raw_response = json.dumps({"damages": damage_list})
 
-            # Update session status so the list shows "Completata"
+            # Update session status
             sess = await db_session.get(Session, session_id)
             if sess and sess.status == "uploaded":
                 sess.status = "completed"
 
             await db_session.commit()
+            logger.info("Analysis completed for session %s: %d damages", session_id, len(damage_list))
 
         except Exception as e:
-            logger.exception("AI analysis failed for session %s", session_id)
+            logger.exception("AI analysis FAILED for session %s: %s", session_id, e)
             analysis.status = "error"
+            analysis.raw_response = json.dumps({"error": str(e)})
             await db_session.commit()
-
-
-def _mock_analysis(photos: list) -> list:
-    """MVP mock: simulate AI damage detection results."""
-    damages = []
-
-    # Simulate finding a graffio on the front
-    if any(p.angle_label == "fronte" for p in photos):
-        damages.append({
-            "damage_type": "graffio",
-            "severity": "lieve",
-            "zone": "frontale",
-            "description": "Graffio superficiale sulla carenatura frontale",
-        })
-
-    # Simulate finding an ammaccatura on the left
-    if any(p.angle_label == "lato_sinistro" for p in photos):
-        damages.append({
-            "damage_type": "ammaccatura",
-            "severity": "moderato",
-            "zone": "laterale_sinistro",
-            "description": "Ammaccatura sulla fiancata sinistra",
-        })
-
-    return damages

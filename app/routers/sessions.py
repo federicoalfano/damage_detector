@@ -304,10 +304,14 @@ async def get_session_results(session_id: str):
                 for d in damages
             ]
 
-        return success_response(data={
+        response_data: dict = {
             "analysis_status": analysis.status,
             "damages": damages_list,
-        })
+        }
+        if analysis.status == "error" and analysis.raw_response:
+            response_data["error"] = analysis.raw_response
+
+        return success_response(data=response_data)
 
 
 @router.delete("/{session_id}")

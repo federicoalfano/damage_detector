@@ -170,7 +170,32 @@ async def list_sessions():
     async with async_session() as db_session:
         result = await db_session.execute(select(Session))
         sessions = result.scalars().all()
-        data = [SessionResponse.model_validate(s).model_dump() for s in sessions]
+
+        data = []
+        for s in sessions:
+            session_data = SessionResponse.model_validate(s).model_dump()
+
+            # Fetch analysis info
+            ar_result = await db_session.execute(
+                select(AnalysisResult).where(AnalysisResult.session_id == s.id)
+            )
+            analysis = ar_result.scalars().first()
+
+            damage_types: list[str] = []
+            damage_count = 0
+            if analysis and analysis.status == "completed":
+                dmg_result = await db_session.execute(
+                    select(Damage).where(Damage.analysis_id == analysis.id)
+                )
+                damages = dmg_result.scalars().all()
+                damage_count = len(damages)
+                damage_types = list({d.damage_type for d in damages})
+
+            session_data["analysis_status"] = analysis.status if analysis else "pending"
+            session_data["damage_types"] = damage_types
+            session_data["damage_count"] = damage_count
+            data.append(session_data)
+
     return success_response(data=data)
 
 

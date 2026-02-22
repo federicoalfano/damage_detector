@@ -98,7 +98,7 @@ async def upload_photo(
                 detail=f"Foto non valida: {validation['reason']}",
             )
 
-        # Create photo record
+        # Create photo record (store bytes in DB for persistence on ephemeral filesystems)
         photo = Photo(
             id=photo_id,
             session_id=session_id,
@@ -108,6 +108,7 @@ async def upload_photo(
             captured_at=datetime.now(timezone.utc).isoformat(),
             is_valid=1,
             upload_status="uploaded",
+            image_data=content,
         )
         db_session.add(photo)
         await db_session.commit()
@@ -330,12 +331,15 @@ async def debug_photos(session_id: str):
         for p in photos:
             exists = os.path.exists(p.file_path)
             size = os.path.getsize(p.file_path) if exists else 0
+            has_blob = p.image_data is not None and len(p.image_data) > 0
             info.append({
                 "id": p.id,
                 "angle": p.angle_label,
                 "path": p.file_path,
-                "exists": exists,
-                "size_bytes": size,
+                "file_exists": exists,
+                "file_size_bytes": size,
+                "db_blob": has_blob,
+                "db_blob_size": len(p.image_data) if has_blob else 0,
             })
 
     return success_response(data=info)

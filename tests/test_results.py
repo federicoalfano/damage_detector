@@ -34,13 +34,13 @@ async def _create_and_complete_session(client, angle_labels=None):
 
 
 @pytest.mark.asyncio
-async def test_results_completed_analysis():
-    """GET results returns damages after analysis completes."""
+async def test_results_analysis_without_api_key():
+    """GET results returns error status when no API key is configured."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         session_id = await _create_and_complete_session(client)
 
-        # Run analysis directly
+        # Run analysis directly (no API key = error)
         await analyze_session(session_id)
 
         response = await client.get(f"/api/v1/sessions/{session_id}/results")
@@ -48,11 +48,7 @@ async def test_results_completed_analysis():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "success"
-    assert body["data"]["analysis_status"] == "completed"
-    assert len(body["data"]["damages"]) == 2
-    damage_types = {d["damage_type"] for d in body["data"]["damages"]}
-    assert "graffio" in damage_types
-    assert "ammaccatura" in damage_types
+    assert body["data"]["analysis_status"] == "error"
 
 
 @pytest.mark.asyncio

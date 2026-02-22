@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer
+from sqlalchemy import Column, String, Integer, LargeBinary
 from sqlalchemy import ForeignKey
 
 from app.database import Base
@@ -16,3 +16,4 @@ class Photo(Base):
     is_valid = Column(Integer, nullable=False, default=0)
     validation_message = Column(String, nullable=True)
     upload_status = Column(String, nullable=False, default="pending")
+    image_data = Column(LargeBinary, nullable=True)  # persistent copy of photo bytes

@@ -13,9 +13,22 @@ from app.routers.sessions import router as sessions_router
 from app.utils.exceptions import register_exception_handlers
 
 
+async def _run_migrations():
+    """Add new columns to existing tables (SQLite doesn't auto-add via create_all)."""
+    from sqlalchemy import text
+    async with async_session() as session:
+        # Add image_data BLOB column to photos if missing
+        result = await session.execute(text("PRAGMA table_info(photos)"))
+        columns = {row[1] for row in result.fetchall()}
+        if "image_data" not in columns:
+            await session.execute(text("ALTER TABLE photos ADD COLUMN image_data BLOB"))
+            await session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_tables()
+    await _run_migrations()
     async with async_session() as session:
         await seed_data(session)
     yield

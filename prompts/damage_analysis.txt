@@ -1,39 +1,24 @@
-Analizza queste foto di un veicolo Poste Italiane (scooter o triciclo cargo) per la presenza di danni e pezzi mancanti.
-Le foto mostrano il veicolo da diverse angolazioni: frontale, laterale destro, posteriore e laterale sinistro.
+Sei un perito assicurativo esperto. Ti mostro foto di uno scooter/triciclo aziendale Poste Italiane ripreso da 4 angolazioni (fronte, lato destro, retro, lato sinistro).
 
-ISTRUZIONI IMPORTANTI:
-- Elenca OGNI danno singolarmente, anche se ce ne sono più di uno sulla stessa zona. Non accorpare più danni in uno solo.
-- Controlla attentamente se mancano componenti: specchietti, frecce/indicatori, fanali, carter, pedane, parabrezza, bauletto, parafanghi, cavalletto, targa.
-- Confronta il lato destro e sinistro: se un componente è presente da un lato ma assente dall'altro, segnalalo come pezzo_mancante.
-- Distingui tra graffio (segno superficiale), ammaccatura (deformazione), crepa (frattura senza distacco), rottura (pezzo rotto/distaccato).
+STEP 1 — Osserva ogni foto attentamente e descrivi TUTTO ciò che noti di anomalo:
+- Graffi, abrasioni, segni di sfregamento (anche piccoli)
+- Ammaccature, deformazioni, piegature
+- Crepe, fratture visibili
+- Parti rotte o staccate
+- PARTI MANCANTI: specchietti, frecce, fanali, carter, coperture, pedane, bauletto, parabrezza, parafanghi. Se un pezzo c'è da un lato e non dall'altro, è mancante.
+- Danni al bauletto/top-case posteriore (graffi, ammaccature, chiusure rotte)
+- Qualsiasi altra anomalia
 
-Per ogni danno o pezzo mancante rilevato, fornisci:
-1. **damage_type**: uno tra [graffio, ammaccatura, crepa, rottura, pezzo_mancante]
-2. **severity**: uno tra [lieve, moderato, grave]
-3. **zone**: uno tra [frontale, laterale_sinistro, posteriore, laterale_destro, superiore]
-4. **description**: breve descrizione specifica (in italiano), indicando la posizione esatta sul veicolo
+STEP 2 — Per ogni anomalia trovata, classificala nel JSON seguente.
 
-Criteri di gravità:
-- **lieve**: danno estetico superficiale (graffi leggeri, piccole abrasioni)
-- **moderato**: danno visibile che compromette l'estetica o componenti funzionali non critici
-- **grave**: danno strutturale, componente di sicurezza mancante/rotto (specchietto, fanale, freccia)
+Regole:
+- Un danno per ogni problema distinto (non raggruppare)
+- damage_type: "graffio" | "ammaccatura" | "crepa" | "rottura" | "pezzo_mancante"
+- severity: "lieve" (estetico) | "moderato" (funzionale) | "grave" (sicurezza: specchietto, fanale, freccia mancante)
+- zone: "frontale" | "laterale_sinistro" | "posteriore" | "laterale_destro" | "superiore"
+- description: dove esattamente si trova e com'è il danno
 
-Criteri per pezzo_mancante:
-- Specchietto mancante → grave (sicurezza)
-- Freccia/fanale mancante → grave (sicurezza)
-- Carter/copertura mancante → moderato (funzionale)
-- Elemento estetico mancante → lieve
+Rispondi SOLO con il JSON finale (nessun testo prima o dopo):
+{"damages": [...]}
 
-Rispondi SOLO in formato JSON con questa struttura:
-{
-  "damages": [
-    {
-      "damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante",
-      "severity": "lieve|moderato|grave",
-      "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore",
-      "description": "descrizione specifica del danno o pezzo mancante"
-    }
-  ]
-}
-
-Se non rilevi danni né pezzi mancanti, rispondi: {"damages": []}
+Se non trovi nulla: {"damages": []}

@@ -46,11 +46,11 @@ def _build_api_kwargs(model: str, content: list[dict]) -> dict:
         # o-series reasoning models (o1, o3, o4-mini, etc.)
         # - no temperature support
         # - use max_completion_tokens instead of max_tokens
-        api_kwargs["max_completion_tokens"] = 4096
+        api_kwargs["max_completion_tokens"] = 8192
     else:
         # gpt-series models (gpt-4o-mini, gpt-4o, gpt-4-turbo, etc.)
-        api_kwargs["max_tokens"] = 2048
-        api_kwargs["temperature"] = 0.1
+        api_kwargs["max_tokens"] = 4096
+        api_kwargs["temperature"] = 0.2
 
     return api_kwargs
 

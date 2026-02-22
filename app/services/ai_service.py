@@ -190,5 +190,9 @@ async def analyze_session(session_id: str) -> None:
         except Exception as e:
             logger.exception("AI analysis FAILED for session %s: %s", session_id, e)
             analysis.status = "error"
-            analysis.raw_response = json.dumps({"error": str(e)})
+            # Mask sensitive info (API keys, tokens) from error message
+            error_msg = str(e)
+            import re
+            error_msg = re.sub(r'sk-[A-Za-z0-9_-]+', 'sk-***', error_msg)
+            analysis.raw_response = json.dumps({"error": error_msg})
             await db_session.commit()

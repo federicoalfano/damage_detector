@@ -26,31 +26,21 @@ def _load_prompt() -> str:
         return f.read()
 
 
-def _encode_image_base64(file_path: str, db_blob: bytes | None = None) -> str | None:
-    """Read an image file and return its base64 encoding.
-    Falls back to db_blob if the file doesn't exist on disk (ephemeral filesystem)."""
-    data: bytes | None = None
-
-    if os.path.exists(file_path):
-        size = os.path.getsize(file_path)
-        logger.info("Reading photo from disk: %s (%d bytes / %.1f KB)", file_path, size, size / 1024)
-        if size > 0:
-            with open(file_path, "rb") as f:
-                data = f.read()
-    else:
-        logger.warning("Photo file NOT FOUND on disk: %s", file_path)
-
-    if data is None and db_blob:
-        logger.info("Using DB blob for photo (%d bytes / %.1f KB)", len(db_blob), len(db_blob) / 1024)
-        data = db_blob
-
-    if not data:
-        logger.warning("No photo data available for: %s", file_path)
+def _encode_image_base64(file_path: str) -> str | None:
+    """Read an image file and return its base64 encoding."""
+    if not os.path.exists(file_path):
+        logger.warning("Photo file NOT FOUND: %s", file_path)
         return None
-
-    b64 = base64.b64encode(data).decode("utf-8")
-    logger.info("Encoded photo: %d bytes base64", len(b64))
-    return b64
+    size = os.path.getsize(file_path)
+    logger.info("Reading photo: %s (%d bytes / %.1f KB)", file_path, size, size / 1024)
+    if size == 0:
+        logger.warning("Photo file is EMPTY: %s", file_path)
+        return None
+    with open(file_path, "rb") as f:
+        data = f.read()
+        b64 = base64.b64encode(data).decode("utf-8")
+        logger.info("Encoded photo: %d bytes base64", len(b64))
+        return b64
 
 
 def _build_api_kwargs(model: str, content: list[dict]) -> dict:
@@ -94,7 +84,7 @@ async def _call_openai(photos: list) -> list:
     }
 
     for photo in photos:
-        b64 = _encode_image_base64(photo.file_path, db_blob=photo.image_data)
+        b64 = _encode_image_base64(photo.file_path)
         if b64 is None:
             continue
         label = angle_labels.get(photo.angle_label, photo.angle_label)

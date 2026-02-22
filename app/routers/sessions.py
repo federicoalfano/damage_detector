@@ -98,7 +98,7 @@ async def upload_photo(
                 detail=f"Foto non valida: {validation['reason']}",
             )
 
-        # Create photo record (store bytes in DB for persistence on ephemeral filesystems)
+        # Create photo record
         photo = Photo(
             id=photo_id,
             session_id=session_id,
@@ -108,7 +108,6 @@ async def upload_photo(
             captured_at=datetime.now(timezone.utc).isoformat(),
             is_valid=1,
             upload_status="uploaded",
-            image_data=content,
         )
         db_session.add(photo)
         await db_session.commit()
@@ -331,22 +330,19 @@ async def debug_photos(session_id: str):
         for p in photos:
             exists = os.path.exists(p.file_path)
             size = os.path.getsize(p.file_path) if exists else 0
-            has_blob = p.image_data is not None and len(p.image_data) > 0
             info.append({
                 "id": p.id,
                 "angle": p.angle_label,
                 "path": p.file_path,
-                "file_exists": exists,
-                "file_size_bytes": size,
-                "db_blob": has_blob,
-                "db_blob_size": len(p.image_data) if has_blob else 0,
+                "exists": exists,
+                "size_bytes": size,
             })
 
     return success_response(data=info)
 
 
 @router.post("/{session_id}/reanalyze")
-async def reanalyze_session(session_id: str):
+async def reanalyze_session(session_id: str, files: list[UploadFile] = File(default=[])):
     async with async_session() as db_session:
         sess = await db_session.get(Session, session_id)
         if not sess:
@@ -361,6 +357,40 @@ async def reanalyze_session(session_id: str):
                 delete(Damage).where(Damage.analysis_id == analysis.id)
             )
             await db_session.delete(analysis)
+
+        # If photos provided, save them to disk and update records
+        if files:
+            # Delete existing photo records
+            await db_session.execute(
+                delete(Photo).where(Photo.session_id == session_id)
+            )
+
+            session_dir = os.path.join(UPLOAD_DIR, session_id)
+            os.makedirs(session_dir, exist_ok=True)
+
+            for i, file in enumerate(files):
+                photo_id = str(uuid_mod.uuid4())
+                filename = f"{photo_id}.jpg"
+                file_path = os.path.join(session_dir, filename)
+
+                content = await file.read()
+                with open(file_path, "wb") as f:
+                    f.write(content)
+
+                # Extract angle info from filename (phone sends angle_label as filename)
+                angle_label = file.filename.rsplit('.', 1)[0] if file.filename else f"angle_{i}"
+
+                photo = Photo(
+                    id=photo_id,
+                    session_id=session_id,
+                    angle_index=i,
+                    angle_label=angle_label,
+                    file_path=file_path,
+                    captured_at=datetime.now(timezone.utc).isoformat(),
+                    is_valid=1,
+                    upload_status="uploaded",
+                )
+                db_session.add(photo)
 
         # Reset session status
         sess.status = "uploaded"

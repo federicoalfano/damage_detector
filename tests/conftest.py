@@ -12,11 +12,9 @@ def setup_test_db():
 
     from app.database import create_tables, async_session
     from app.seed import seed_data
-    from app.main import _run_migrations
 
     async def _setup():
         await create_tables()
-        await _run_migrations()
         async with async_session() as session:
             await seed_data(session)
 

@@ -1,22 +1,26 @@
-Analizza queste foto di un veicolo Poste Italiane per la presenza di danni.
+Analizza queste foto di un veicolo Poste Italiane per la presenza di danni e pezzi mancanti.
 Le foto mostrano il veicolo da diverse angolazioni: frontale, laterale destro, posteriore e laterale sinistro.
 
-Per ogni danno rilevato, fornisci:
-1. **tipo**: uno tra [graffio, ammaccatura, crepa, rottura]
+Per ogni danno o pezzo mancante rilevato, fornisci:
+1. **tipo**: uno tra [graffio, ammaccatura, crepa, rottura, pezzo_mancante]
 2. **gravità**: uno tra [lieve, moderato, grave]
 3. **zona**: uno tra [frontale, laterale_sinistro, posteriore, laterale_destro, superiore]
-4. **descrizione**: breve descrizione del danno visibile (in italiano)
+4. **descrizione**: breve descrizione del danno o del pezzo mancante (in italiano)
+
+Note:
+- "pezzo_mancante" indica un componente che dovrebbe essere presente ma risulta assente (es. specchietto, parafango, carter, pedana, bauletto, freccia, fanale, parabrezza, ecc.)
+- Per i pezzi mancanti, la gravità dipende dall'importanza del pezzo: "grave" per componenti essenziali alla sicurezza, "moderato" per componenti funzionali, "lieve" per componenti estetici
 
 Rispondi SOLO in formato JSON con questa struttura:
 {
   "damages": [
     {
-      "damage_type": "graffio|ammaccatura|crepa|rottura",
+      "damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante",
       "severity": "lieve|moderato|grave",
       "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore",
-      "description": "descrizione breve del danno"
+      "description": "descrizione breve del danno o del pezzo mancante"
     }
   ]
 }
 
-Se non rilevi danni, rispondi: {"damages": []}
+Se non rilevi danni né pezzi mancanti, rispondi: {"damages": []}

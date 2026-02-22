@@ -10,6 +10,7 @@ from app.config import settings
 from app.database import async_session
 from app.models.analysis import AnalysisResult, Damage
 from app.models.photo import Photo
+from app.models.session import Session
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +61,24 @@ async def _call_openai(photos: list) -> list:
         # No valid photos to analyze
         return []
 
-    response = client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
+    # o4-mini uses max_completion_tokens instead of max_tokens,
+    # and does not support the temperature parameter
+    api_kwargs: dict = {
+        "model": settings.openai_model,
+        "messages": [
             {
                 "role": "user",
                 "content": content,
             }
         ],
-        max_tokens=1024,
-        temperature=0.1,
-    )
+    }
+    if settings.openai_model.startswith("o"):
+        api_kwargs["max_completion_tokens"] = 2048
+    else:
+        api_kwargs["max_tokens"] = 1024
+        api_kwargs["temperature"] = 0.1
+
+    response = client.chat.completions.create(**api_kwargs)
 
     raw_text = response.choices[0].message.content or ""
     logger.info("OpenAI raw response: %s", raw_text)
@@ -87,7 +95,7 @@ async def _call_openai(photos: list) -> list:
     damages = parsed.get("damages", [])
 
     # Validate structure
-    valid_types = {"graffio", "ammaccatura", "crepa", "rottura"}
+    valid_types = {"graffio", "ammaccatura", "crepa", "rottura", "pezzo_mancante"}
     valid_severities = {"lieve", "moderato", "grave"}
     valid_zones = {"frontale", "laterale_sinistro", "posteriore", "laterale_destro", "superiore"}
 
@@ -156,6 +164,12 @@ async def analyze_session(session_id: str) -> None:
 
             analysis.status = "completed"
             analysis.raw_response = json.dumps({"damages": damage_list})
+
+            # Update session status so the list shows "Completata"
+            sess = await db_session.get(Session, session_id)
+            if sess and sess.status == "uploaded":
+                sess.status = "completed"
+
             await db_session.commit()
 
         except Exception as e:

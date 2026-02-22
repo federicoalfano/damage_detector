@@ -1,24 +1,18 @@
-Sei un perito assicurativo esperto. Ti mostro foto di uno scooter/triciclo aziendale Poste Italiane ripreso da 4 angolazioni (fronte, lato destro, retro, lato sinistro).
+Queste foto mostrano uno scooter o triciclo Poste Italiane da 4 angolazioni.
+Elenca TUTTI i danni e le anomalie visibili.
 
-STEP 1 — Osserva ogni foto attentamente e descrivi TUTTO ciò che noti di anomalo:
-- Graffi, abrasioni, segni di sfregamento (anche piccoli)
-- Ammaccature, deformazioni, piegature
-- Crepe, fratture visibili
-- Parti rotte o staccate
-- PARTI MANCANTI: specchietti, frecce, fanali, carter, coperture, pedane, bauletto, parabrezza, parafanghi. Se un pezzo c'è da un lato e non dall'altro, è mancante.
-- Danni al bauletto/top-case posteriore (graffi, ammaccature, chiusure rotte)
-- Qualsiasi altra anomalia
+Cosa cercare:
+- Graffi e abrasioni su carrozzeria, pedane, parafanghi, bauletto
+- Ammaccature e deformazioni
+- Crepe e rotture
+- Specchietti mancanti o rotti
+- Frecce, fanali, carter, coperture mancanti o rotte
+- Danni al bauletto/top-case (graffi, ammaccature, serratura)
+- Sporcizia eccessiva che nasconde possibili danni
 
-STEP 2 — Per ogni anomalia trovata, classificala nel JSON seguente.
+Elenca ogni danno separatamente. Non raggruppare.
 
-Regole:
-- Un danno per ogni problema distinto (non raggruppare)
-- damage_type: "graffio" | "ammaccatura" | "crepa" | "rottura" | "pezzo_mancante"
-- severity: "lieve" (estetico) | "moderato" (funzionale) | "grave" (sicurezza: specchietto, fanale, freccia mancante)
-- zone: "frontale" | "laterale_sinistro" | "posteriore" | "laterale_destro" | "superiore"
-- description: dove esattamente si trova e com'è il danno
-
-Rispondi SOLO con il JSON finale (nessun testo prima o dopo):
-{"damages": [...]}
+Rispondi in JSON:
+{"damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante", "severity": "lieve|moderato|grave", "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore", "description": "dove si trova e com'è"}]}
 
 Se non trovi nulla: {"damages": []}

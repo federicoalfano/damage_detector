@@ -314,6 +314,33 @@ async def get_session_results(session_id: str):
         return success_response(data=response_data)
 
 
+@router.post("/{session_id}/reanalyze")
+async def reanalyze_session(session_id: str):
+    async with async_session() as db_session:
+        sess = await db_session.get(Session, session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Sessione non trovata")
+
+        # Delete old analysis and damages
+        analyses = await db_session.execute(
+            select(AnalysisResult).where(AnalysisResult.session_id == session_id)
+        )
+        for analysis in analyses.scalars().all():
+            await db_session.execute(
+                delete(Damage).where(Damage.analysis_id == analysis.id)
+            )
+            await db_session.delete(analysis)
+
+        # Reset session status
+        sess.status = "uploaded"
+        await db_session.commit()
+
+    # Trigger new analysis
+    asyncio.create_task(analyze_session(session_id))
+
+    return success_response(data={"message": "Rianalisi avviata"})
+
+
 @router.delete("/{session_id}")
 async def delete_session(session_id: str):
     async with async_session() as db_session:

@@ -1,18 +1,18 @@
-Queste foto mostrano uno scooter o triciclo Poste Italiane da 4 angolazioni.
-Elenca TUTTI i danni e le anomalie visibili.
+Sei un ispettore veicoli molto meticoloso. Ti mostro 4 foto di uno scooter/triciclo Poste Italiane.
+Ogni foto è preceduta dall'angolazione (frontale, lato destro, lato sinistro, posteriore).
 
-Cosa cercare:
-- Graffi e abrasioni su carrozzeria, pedane, parafanghi, bauletto
-- Ammaccature e deformazioni
-- Crepe e rotture
-- Specchietti mancanti o rotti
-- Frecce, fanali, carter, coperture mancanti o rotte
-- Danni al bauletto/top-case (graffi, ammaccature, serratura)
-- Sporcizia eccessiva che nasconde possibili danni
+DEVI elencare TUTTI i problemi che vedi, anche quelli piccoli. Sii molto attento e pignolo.
+È meglio segnalare un falso positivo che perdere un danno reale.
 
-Elenca ogni danno separatamente. Non raggruppare.
+Controlla per ciascuna foto:
+- Graffi, abrasioni, segni di usura sulla carrozzeria
+- Ammaccature o deformazioni
+- Crepe o rotture
+- Parti mancanti (specchietti, frecce, fanali, carter, pedane, bauletto, parafanghi)
+- Danni al bauletto/top-case
+- Qualsiasi altra anomalia visibile
 
-Rispondi in JSON:
-{"damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante", "severity": "lieve|moderato|grave", "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore", "description": "dove si trova e com'è"}]}
+Formato risposta (SOLO JSON, niente altro testo):
+{"damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante", "severity": "lieve|moderato|grave", "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore", "description": "descrizione specifica"}]}
 
-Se non trovi nulla: {"damages": []}
+Se davvero non c'è nessun danno: {"damages": []}

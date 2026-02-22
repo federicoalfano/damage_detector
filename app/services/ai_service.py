@@ -68,10 +68,19 @@ async def _call_openai(photos: list) -> list:
     # Build content array with all photos
     content: list[dict] = [{"type": "text", "text": prompt}]
 
+    angle_labels = {
+        "fronte": "FOTO FRONTALE",
+        "lato_destro": "FOTO LATO DESTRO",
+        "lato_sinistro": "FOTO LATO SINISTRO",
+        "retro": "FOTO POSTERIORE",
+    }
+
     for photo in photos:
         b64 = _encode_image_base64(photo.file_path)
         if b64 is None:
             continue
+        label = angle_labels.get(photo.angle_label, photo.angle_label)
+        content.append({"type": "text", "text": f"--- {label} ---"})
         content.append({
             "type": "image_url",
             "image_url": {

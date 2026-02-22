@@ -308,8 +308,8 @@ async def get_session_results(session_id: str):
             "analysis_status": analysis.status,
             "damages": damages_list,
         }
-        if analysis.status == "error" and analysis.raw_response:
-            response_data["error"] = analysis.raw_response
+        if analysis.raw_response:
+            response_data["raw_response"] = analysis.raw_response
 
         return success_response(data=response_data)
 

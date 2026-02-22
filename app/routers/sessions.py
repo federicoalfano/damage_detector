@@ -314,6 +314,33 @@ async def get_session_results(session_id: str):
         return success_response(data=response_data)
 
 
+@router.get("/{session_id}/debug-photos")
+async def debug_photos(session_id: str):
+    async with async_session() as db_session:
+        sess = await db_session.get(Session, session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Sessione non trovata")
+
+        result = await db_session.execute(
+            select(Photo).where(Photo.session_id == session_id)
+        )
+        photos = result.scalars().all()
+
+        info = []
+        for p in photos:
+            exists = os.path.exists(p.file_path)
+            size = os.path.getsize(p.file_path) if exists else 0
+            info.append({
+                "id": p.id,
+                "angle": p.angle_label,
+                "path": p.file_path,
+                "exists": exists,
+                "size_bytes": size,
+            })
+
+    return success_response(data=info)
+
+
 @router.post("/{session_id}/reanalyze")
 async def reanalyze_session(session_id: str):
     async with async_session() as db_session:

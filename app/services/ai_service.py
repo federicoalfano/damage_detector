@@ -29,10 +29,18 @@ def _load_prompt() -> str:
 def _encode_image_base64(file_path: str) -> str | None:
     """Read an image file and return its base64 encoding."""
     if not os.path.exists(file_path):
-        logger.warning("Photo file not found: %s", file_path)
+        logger.warning("Photo file NOT FOUND: %s", file_path)
+        return None
+    size = os.path.getsize(file_path)
+    logger.info("Reading photo: %s (%d bytes / %.1f KB)", file_path, size, size / 1024)
+    if size == 0:
+        logger.warning("Photo file is EMPTY: %s", file_path)
         return None
     with open(file_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+        data = f.read()
+        b64 = base64.b64encode(data).decode("utf-8")
+        logger.info("Encoded photo: %d bytes base64", len(b64))
+        return b64
 
 
 def _build_api_kwargs(model: str, content: list[dict]) -> dict:

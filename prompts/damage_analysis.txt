@@ -1,0 +1,22 @@
+Analizza queste foto di un veicolo Poste Italiane per la presenza di danni.
+Le foto mostrano il veicolo da diverse angolazioni: frontale, laterale destro, posteriore e laterale sinistro.
+
+Per ogni danno rilevato, fornisci:
+1. **tipo**: uno tra [graffio, ammaccatura, crepa, rottura]
+2. **gravità**: uno tra [lieve, moderato, grave]
+3. **zona**: uno tra [frontale, laterale_sinistro, posteriore, laterale_destro, superiore]
+4. **descrizione**: breve descrizione del danno visibile (in italiano)
+
+Rispondi SOLO in formato JSON con questa struttura:
+{
+  "damages": [
+    {
+      "damage_type": "graffio|ammaccatura|crepa|rottura",
+      "severity": "lieve|moderato|grave",
+      "zone": "frontale|laterale_sinistro|posteriore|laterale_destro|superiore",
+      "description": "descrizione breve del danno"
+    }
+  ]
+}
+
+Se non rilevi danni, rispondi: {"damages": []}

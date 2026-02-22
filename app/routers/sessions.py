@@ -4,7 +4,9 @@ import uuid as uuid_mod
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from sqlalchemy import select
+import shutil
+
+from sqlalchemy import select, delete
 
 from app.database import async_session
 from app.models.analysis import AnalysisResult, Damage
@@ -306,3 +308,34 @@ async def get_session_results(session_id: str):
             "analysis_status": analysis.status,
             "damages": damages_list,
         })
+
+
+@router.delete("/{session_id}")
+async def delete_session(session_id: str):
+    async with async_session() as db_session:
+        sess = await db_session.get(Session, session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Sessione non trovata")
+
+        # Delete damages -> analysis -> photos -> session
+        analyses = await db_session.execute(
+            select(AnalysisResult).where(AnalysisResult.session_id == session_id)
+        )
+        for analysis in analyses.scalars().all():
+            await db_session.execute(
+                delete(Damage).where(Damage.analysis_id == analysis.id)
+            )
+            await db_session.delete(analysis)
+
+        await db_session.execute(
+            delete(Photo).where(Photo.session_id == session_id)
+        )
+        await db_session.delete(sess)
+        await db_session.commit()
+
+    # Remove photos from disk
+    session_dir = os.path.join(UPLOAD_DIR, session_id)
+    if os.path.isdir(session_dir):
+        shutil.rmtree(session_dir)
+
+    return success_response(data={"deleted": session_id})

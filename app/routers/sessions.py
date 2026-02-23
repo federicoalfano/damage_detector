@@ -86,17 +86,12 @@ async def upload_photo(
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # Validate photo against expected vehicle type
-        vehicle_type = vehicle.type if vehicle else ""
-        validation = await validate_photo(file_path, vehicle_type)
-
-        if not validation["valid"]:
-            # Remove the invalid file
-            os.remove(file_path)
-            raise HTTPException(
-                status_code=422,
-                detail=f"Foto non valida: {validation['reason']}",
-            )
+        # Photo validation disabled — saves one API call per photo
+        # vehicle_type = vehicle.type if vehicle else ""
+        # validation = await validate_photo(file_path, vehicle_type)
+        # if not validation["valid"]:
+        #     os.remove(file_path)
+        #     raise HTTPException(status_code=422, detail=f"Foto non valida: {validation['reason']}")
 
         # Create photo record
         photo = Photo(

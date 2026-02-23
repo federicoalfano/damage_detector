@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import re
 import uuid
 
 from sqlalchemy import select
@@ -108,7 +109,6 @@ async def _call_openai(photos: list) -> list:
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{b64}",
-                "detail": "high",
             },
         })
 
@@ -124,15 +124,17 @@ async def _call_openai(photos: list) -> list:
     raw_text = response.choices[0].message.content or ""
     logger.info("OpenAI raw response (%d chars): %s", len(raw_text), raw_text[:500])
 
-    # Parse JSON from response (handle markdown code blocks)
-    json_text = raw_text.strip()
+    # Strip <think>...</think> blocks (Qwen3, DeepSeek, etc.)
+    json_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+
+    # Strip markdown code fences
     if json_text.startswith("```"):
         lines = json_text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
-        json_text = "\n".join(lines)
+        json_text = "\n".join(lines).strip()
 
     parsed = json.loads(json_text)
-    damages = parsed.get("damages", [])
+    damages = parsed.get("damages", parsed.get("danni", []))
 
     # Validate structure
     valid_types = {"graffio", "ammaccatura", "crepa", "rottura", "pezzo_mancante"}
@@ -150,8 +152,8 @@ async def _call_openai(photos: list) -> list:
         else:
             logger.warning("Skipping invalid damage entry: %s", d)
 
-    logger.info("OpenAI analysis: %d damages validated out of %d returned", len(validated), len(damages))
-    return validated
+    logger.info("AI analysis: %d damages validated out of %d returned", len(validated), len(damages))
+    return validated, raw_text
 
 
 async def analyze_session(session_id: str) -> None:
@@ -194,7 +196,7 @@ async def analyze_session(session_id: str) -> None:
                 return
 
             # Call OpenAI — NO silent fallback to mock
-            damage_list = await _call_openai(photos)
+            damage_list, raw_model_text = await _call_openai(photos)
 
             # Save damages
             for damage_data in damage_list:
@@ -209,7 +211,7 @@ async def analyze_session(session_id: str) -> None:
                 db_session.add(damage)
 
             analysis.status = "completed"
-            analysis.raw_response = json.dumps({"damages": damage_list})
+            analysis.raw_response = raw_model_text
 
             # Update session status
             sess = await db_session.get(Session, session_id)
@@ -224,7 +226,6 @@ async def analyze_session(session_id: str) -> None:
             analysis.status = "error"
             # Mask sensitive info (API keys, tokens) from error message
             error_msg = str(e)
-            import re
             error_msg = re.sub(r'sk-[A-Za-z0-9_-]+', 'sk-***', error_msg)
             analysis.raw_response = json.dumps({"error": error_msg})
             await db_session.commit()

@@ -43,6 +43,18 @@ def _encode_image_base64(file_path: str) -> str | None:
         return b64
 
 
+_REASONING_PREFIXES = ("o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """Check if a model is an OpenAI reasoning model (o1/o3/o4 series).
+
+    Handles provider-prefixed IDs like 'openai/o4-mini'.
+    """
+    name = model.rsplit("/", 1)[-1]
+    return name.startswith(_REASONING_PREFIXES)
+
+
 def _build_api_kwargs(model: str, content: list[dict]) -> dict:
     """Build OpenAI API kwargs based on model type."""
     api_kwargs: dict = {
@@ -50,13 +62,13 @@ def _build_api_kwargs(model: str, content: list[dict]) -> dict:
         "messages": [{"role": "user", "content": content}],
     }
 
-    if model.startswith("o"):
+    if _is_reasoning_model(model):
         # o-series reasoning models (o1, o3, o4-mini, etc.)
         # - no temperature support
         # - use max_completion_tokens instead of max_tokens
         api_kwargs["max_completion_tokens"] = 8192
     else:
-        # gpt-series models (gpt-4o-mini, gpt-4o, gpt-4-turbo, etc.)
+        # All other models (gpt-series, Gemini, Qwen, Llama, etc.)
         api_kwargs["max_tokens"] = 4096
         api_kwargs["temperature"] = 0.2
 

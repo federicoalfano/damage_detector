@@ -114,7 +114,7 @@ async def _call_openai(photos: list) -> list:
 
     if len(content) <= 1:
         logger.warning("No valid photos to analyze")
-        return []
+        return [], ""
 
     api_kwargs = _build_api_kwargs(model, content)
     logger.info("OpenAI request: model=%s, photos=%d", model, len(content) - 1)

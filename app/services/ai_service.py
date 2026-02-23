@@ -70,7 +70,10 @@ async def _call_openai(photos: list) -> list:
     model = settings.openai_model
     logger.info("Calling OpenAI model=%s with %d photos", model, len(photos))
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    kwargs = {"api_key": settings.openai_api_key}
+    if settings.openai_base_url:
+        kwargs["base_url"] = settings.openai_base_url
+    client = OpenAI(**kwargs)
     prompt = _load_prompt()
 
     # Build content array with all photos

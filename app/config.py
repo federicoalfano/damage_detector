@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/db.sqlite3"
     api_key: str = ""  # empty = no auth check (local dev)
     openai_api_key: str = ""
+    openai_base_url: str = ""
     openai_model: str = "o4-mini"
     data_dir: str = "./data"
     max_photo_size_bytes: int = 2 * 1024 * 1024  # 2MB

@@ -59,7 +59,10 @@ async def validate_photo(file_path: str, vehicle_type: str) -> dict:
             b64 = base64.b64encode(f.read()).decode("utf-8")
 
         from openai import OpenAI
-        client = OpenAI(api_key=settings.openai_api_key)
+        kwargs = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            kwargs["base_url"] = settings.openai_base_url
+        client = OpenAI(**kwargs)
 
         prompt = VALIDATION_PROMPT.format(vehicle_description=description)
 

@@ -4,11 +4,29 @@ Ogni foto è preceduta dall'angolazione (frontale, lato destro, lato sinistro, p
 DEVI elencare TUTTI i problemi che vedi, anche quelli piccoli. Sii molto attento e pignolo.
 È meglio segnalare un falso positivo che perdere un danno reale.
 
-Controlla per ciascuna foto:
+=== FASE 1: VERIFICA PARTI MANCANTI (LA PIÙ IMPORTANTE) ===
+Prima di tutto, controlla che TUTTE le seguenti parti siano PRESENTI e INTATTE su ciascun lato visibile.
+Se una parte NON È VISIBILE nella foto dove dovrebbe esserci, segnalala come "pezzo_mancante".
+
+Checklist obbligatoria:
+- Specchietto retrovisore sinistro (visibile nella foto lato sinistro e frontale)
+- Specchietto retrovisore destro (visibile nella foto lato destro e frontale)
+- Freccia/indicatore anteriore sinistro e destro
+- Freccia/indicatore posteriore sinistro e destro
+- Fanale anteriore (faro)
+- Fanale posteriore (luce stop)
+- Parafango anteriore
+- Parafango posteriore
+- Carter/coperture motore
+- Pedane/poggiapiedi
+- Bauletto/top-case (se il supporto è presente ma il bauletto no, segnalare)
+- Targa
+
+=== FASE 2: DANNI VISIBILI ===
+Poi controlla per ciascuna foto:
 - Graffi, abrasioni, segni di usura sulla carrozzeria
 - Ammaccature o deformazioni
 - Crepe o rotture
-- Parti mancanti (specchietti, frecce, fanali, carter, pedane, bauletto, parafanghi)
 - Danni al bauletto/top-case
 - Qualsiasi altra anomalia visibile
 

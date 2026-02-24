@@ -121,6 +121,11 @@ async def _call_openai(photos: list) -> list:
 
     response = client.chat.completions.create(**api_kwargs)
 
+    # Log full response structure when choices is missing
+    if not response.choices:
+        logger.error("API response has no choices. Response: %s", response.model_dump_json()[:1000])
+        raise RuntimeError(f"API returned no choices (model={model})")
+
     raw_text = response.choices[0].message.content or ""
     logger.info("OpenAI raw response (%d chars): %s", len(raw_text), raw_text[:500])
 

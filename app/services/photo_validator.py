@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 # Descriptions used in the validation prompt
 VEHICLE_DESCRIPTIONS: dict[str, str] = {
     "piaggio": (
-        "Piaggio Ape: un veicolo a 3 ruote con vano cargo posteriore "
-        "(cassone/box). Ha due ruote dietro e una davanti, design compatto "
-        "e utilitario per consegne urbane."
+        "Piaggio Liberty: uno scooter elettrico a due ruote. "
+        "Design classico con ruote alte, sella comoda e vano sottosella, "
+        "utilizzato per mobilità urbana."
     ),
     "ligier": (
         "Ligier: un quadriciclo leggero elettrico, simile a una microcar. "

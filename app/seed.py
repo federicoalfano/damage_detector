@@ -9,7 +9,7 @@ from app.models.user import User
 
 
 SEED_VEHICLES = [
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-001")), "model": "Piaggio Ape", "plate": "AB12345", "type": "piaggio"},
+    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-001")), "model": "Piaggio Liberty", "plate": "AB12345", "type": "piaggio"},
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-ligier-001")), "model": "Ligier", "plate": "EF11223", "type": "ligier"},
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-mymoover-001")), "model": "My Moover", "plate": "IJ77889", "type": "my_moover"},
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-scudo-001")), "model": "Fiat Scudo", "plate": "MN22334", "type": "scudo"},
@@ -32,7 +32,7 @@ async def seed_data(session: AsyncSession) -> None:
     if vehicle_count == len(SEED_VEHICLES):
         # Verify it's the right set
         result = await session.execute(
-            select(Vehicle).where(Vehicle.type == "piaggio").limit(1)
+            select(Vehicle).where(Vehicle.model == "Piaggio Liberty").limit(1)
         )
         if result.scalars().first() is not None:
             return

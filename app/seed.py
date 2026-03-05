@@ -40,8 +40,15 @@ async def seed_data(session: AsyncSession) -> None:
     if result.scalars().first() is not None:
         return
 
-    # Remove old seed data (pulse/hurba) before inserting new types
+    # Remove all old data (respecting FK order: damages -> analyses -> photos -> sessions -> vehicles/users)
     from sqlalchemy import delete
+    from app.models.analysis import Damage, AnalysisResult
+    from app.models.photo import Photo
+    from app.models.session import Session
+    await session.execute(delete(Damage))
+    await session.execute(delete(AnalysisResult))
+    await session.execute(delete(Photo))
+    await session.execute(delete(Session))
     await session.execute(delete(Vehicle))
     await session.execute(delete(User))
     await session.flush()

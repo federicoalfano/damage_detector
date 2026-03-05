@@ -44,6 +44,17 @@ async def create_tables():
         from app.models import vehicle, session, photo, analysis, user  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 
+    # Migrate: add new columns if missing (Postgres doesn't auto-add via create_all)
+    if not _is_sqlite():
+        async with engine.begin() as conn:
+            from sqlalchemy import text
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS enabled_until VARCHAR"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS remaining_calls INTEGER DEFAULT 50"
+            ))
+
 
 async def get_db():
     async with async_session() as session:

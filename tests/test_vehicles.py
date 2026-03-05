@@ -14,7 +14,7 @@ async def test_get_vehicles_returns_list():
     body = response.json()
     assert body["status"] == "success"
     assert isinstance(body["data"], list)
-    assert len(body["data"]) == 4
+    assert len(body["data"]) == 8
 
 
 @pytest.mark.asyncio

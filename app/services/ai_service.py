@@ -12,6 +12,7 @@ from app.database import async_session
 from app.models.analysis import AnalysisResult, Damage
 from app.models.photo import Photo
 from app.models.session import Session
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,19 @@ async def analyze_session(session_id: str) -> None:
                     sess.status = "completed"
                     await db_session.commit()
                 return
+
+            # Decrement remaining calls for the user
+            sess = await db_session.get(Session, session_id)
+            if sess:
+                user = await db_session.get(User, sess.user_id)
+                if user and user.remaining_calls is not None:
+                    if user.remaining_calls <= 0:
+                        analysis.status = "error"
+                        analysis.raw_response = json.dumps({"error": "Chiamate esaurite"})
+                        await db_session.commit()
+                        return
+                    user.remaining_calls -= 1
+                    await db_session.commit()
 
             # Call OpenAI — NO silent fallback to mock
             damage_list, raw_model_text = await _call_openai(photos)

@@ -1,3 +1,5 @@
+from datetime import date
+
 import bcrypt
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -22,6 +24,19 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     if not bcrypt.checkpw(request.password.encode(), user.password_hash.encode()):
         raise AppException("Credenziali non valide", status_code=400)
+
+    # Check expiration date
+    if user.enabled_until:
+        try:
+            expiry = date.fromisoformat(user.enabled_until)
+            if date.today() > expiry:
+                raise AppException("Utente scaduto. Contattare l'amministratore.", status_code=403)
+        except ValueError:
+            pass
+
+    # Check remaining calls
+    if user.remaining_calls is not None and user.remaining_calls <= 0:
+        raise AppException("Chiamate esaurite. Contattare l'amministratore.", status_code=403)
 
     return success_response(
         data=LoginResponse(user_id=user.id, username=user.username).model_dump()

@@ -9,15 +9,24 @@ logger = logging.getLogger(__name__)
 
 # Descriptions used in the validation prompt
 VEHICLE_DESCRIPTIONS: dict[str, str] = {
-    "pulse": (
-        "Piaggio Ape Pulse 3: uno scooter elettrico a 3 ruote con un vano cargo "
-        "posteriore (cassone/box). Ha due ruote dietro e una davanti, design compatto "
+    "piaggio": (
+        "Piaggio Ape: un veicolo a 3 ruote con vano cargo posteriore "
+        "(cassone/box). Ha due ruote dietro e una davanti, design compatto "
         "e utilitario per consegne urbane."
     ),
-    "hurba": (
-        "Hurba: uno scooter elettrico a due ruote in stile maxi-scooter (simile al "
-        "Yamaha T-Max). Design sportivo con carenatura aerodinamica, sella lunga, "
-        "e ruote grandi."
+    "ligier": (
+        "Ligier: un quadriciclo leggero elettrico, simile a una microcar. "
+        "Design compatto con abitacolo chiuso, 4 ruote, utilizzato per "
+        "mobilità urbana."
+    ),
+    "my_moover": (
+        "My Moover: un veicolo elettrico compatto per consegne urbane. "
+        "Design moderno, utilizzato per la logistica dell'ultimo miglio."
+    ),
+    "scudo": (
+        "Fiat Scudo: un furgone commerciale di medie dimensioni. "
+        "Design da veicolo commerciale con vano di carico posteriore, "
+        "utilizzato per trasporto merci e consegne."
     ),
 }
 

@@ -9,18 +9,10 @@ from app.models.user import User
 
 
 SEED_VEHICLES = [
-    # Piaggio (ex "pulse" - Piaggio Ape)
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-001")), "model": "Piaggio Ape", "plate": "AB12345", "type": "piaggio"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-002")), "model": "Piaggio Ape", "plate": "CD67890", "type": "piaggio"},
-    # Ligier
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-ligier-001")), "model": "Ligier", "plate": "EF11223", "type": "ligier"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-ligier-002")), "model": "Ligier", "plate": "GH44556", "type": "ligier"},
-    # My Moover
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-mymoover-001")), "model": "My Moover", "plate": "IJ77889", "type": "my_moover"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-mymoover-002")), "model": "My Moover", "plate": "KL99001", "type": "my_moover"},
-    # Scudo
     {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-scudo-001")), "model": "Fiat Scudo", "plate": "MN22334", "type": "scudo"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-scudo-002")), "model": "Fiat Scudo", "plate": "OP55667", "type": "scudo"},
 ]
 
 SEED_USER_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "user-operatore"))
@@ -33,12 +25,17 @@ SEED_TEST_USER_PASSWORD = "test123"
 
 
 async def seed_data(session: AsyncSession) -> None:
-    # Check if new vehicle types already exist
-    result = await session.execute(
-        select(Vehicle).where(Vehicle.type == "piaggio").limit(1)
-    )
-    if result.scalars().first() is not None:
-        return
+    # Check if seed is up-to-date (exactly 4 vehicles = 1 per type)
+    from sqlalchemy import func
+    count_result = await session.execute(select(func.count()).select_from(Vehicle))
+    vehicle_count = count_result.scalar() or 0
+    if vehicle_count == len(SEED_VEHICLES):
+        # Verify it's the right set
+        result = await session.execute(
+            select(Vehicle).where(Vehicle.type == "piaggio").limit(1)
+        )
+        if result.scalars().first() is not None:
+            return
 
     # Remove all old data (respecting FK order: damages -> analyses -> photos -> sessions -> vehicles/users)
     from sqlalchemy import delete

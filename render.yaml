@@ -20,6 +20,10 @@ services:
           property: connectionString
       - key: OPENAI_API_KEY
         sync: false
+      - key: OPENAI_BASE_URL
+        value: "https://openrouter.ai/api/v1"
+      - key: OPENAI_MODEL
+        value: "qwen/qwen3-vl-30b-a3b-instruct"
       - key: API_KEY
         sync: false
       - key: CORS_ORIGINS

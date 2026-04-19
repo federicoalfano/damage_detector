@@ -13,18 +13,26 @@ from app.models.analysis import AnalysisResult, Damage
 from app.models.photo import Photo
 from app.models.session import Session
 from app.models.user import User
+from app.models.vehicle import Vehicle
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = os.path.join(
+PROMPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "prompts",
-    "damage_analysis.txt",
 )
 
+PROMPT_BY_VEHICLE_TYPE = {
+    "scudo": "damage_analysis_scudo.txt",
+}
+DEFAULT_PROMPT_FILE = "damage_analysis.txt"
 
-def _load_prompt() -> str:
-    with open(PROMPT_PATH) as f:
+
+def _load_prompt(vehicle_type: str | None = None) -> str:
+    filename = PROMPT_BY_VEHICLE_TYPE.get(vehicle_type or "", DEFAULT_PROMPT_FILE)
+    path = os.path.join(PROMPTS_DIR, filename)
+    logger.info("Loading prompt for vehicle_type=%s -> %s", vehicle_type, filename)
+    with open(path) as f:
         return f.read()
 
 
@@ -43,6 +51,66 @@ def _encode_image_base64(file_path: str) -> str | None:
         b64 = base64.b64encode(data).decode("utf-8")
         logger.info("Encoded photo: %d bytes base64", len(b64))
         return b64
+
+
+def _extract_damages(text: str) -> list:
+    """Parse JSON damages from model output, tolerating truncation and extra text.
+
+    Strategy:
+      1. Try strict json.loads of the whole text.
+      2. If that fails, extract the first balanced { ... } object and parse it.
+      3. If that also fails (e.g. truncation), recover by parsing the inner array
+         entry-by-entry up to the last complete object.
+    """
+    try:
+        parsed = json.loads(text)
+        return parsed.get("damages", parsed.get("danni", []))
+    except json.JSONDecodeError:
+        pass
+
+    # Find balanced outer object
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(text[start:i + 1])
+                            return parsed.get("damages", parsed.get("danni", []))
+                        except json.JSONDecodeError:
+                            break
+
+    # Truncation recovery: extract individual {...} damage entries
+    damages: list = []
+    for m in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            entry = json.loads(m.group(0))
+            if isinstance(entry, dict) and "damage_type" in entry:
+                damages.append(entry)
+        except json.JSONDecodeError:
+            continue
+    if damages:
+        logger.warning("Recovered %d damages from malformed JSON via fallback parser", len(damages))
+        return damages
+
+    raise ValueError(f"Could not parse damages from response: {text[:200]}")
 
 
 _REASONING_PREFIXES = ("o1", "o3", "o4")
@@ -71,13 +139,13 @@ def _build_api_kwargs(model: str, content: list[dict]) -> dict:
         api_kwargs["max_completion_tokens"] = 8192
     else:
         # All other models (gpt-series, Gemini, Qwen, Llama, etc.)
-        api_kwargs["max_tokens"] = 4096
+        api_kwargs["max_tokens"] = 8192
         api_kwargs["temperature"] = 0.2
 
     return api_kwargs
 
 
-async def _call_openai(photos: list) -> list:
+async def _call_openai(photos: list, vehicle_type: str | None = None) -> list:
     """Call OpenAI Vision API with all session photos."""
     from openai import OpenAI
 
@@ -88,7 +156,7 @@ async def _call_openai(photos: list) -> list:
     if settings.openai_base_url:
         kwargs["base_url"] = settings.openai_base_url
     client = OpenAI(**kwargs)
-    prompt = _load_prompt()
+    prompt = _load_prompt(vehicle_type)
 
     # Build content array with all photos
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -139,13 +207,14 @@ async def _call_openai(photos: list) -> list:
         lines = [l for l in lines if not l.strip().startswith("```")]
         json_text = "\n".join(lines).strip()
 
-    parsed = json.loads(json_text)
-    damages = parsed.get("damages", parsed.get("danni", []))
+    damages = _extract_damages(json_text)
 
     # Validate structure
-    valid_types = {"graffio", "ammaccatura", "crepa", "rottura", "pezzo_mancante"}
+    valid_types = {"graffio", "ammaccatura", "crepa", "rottura", "pezzo_mancante", "usura", "sporcizia"}
     valid_severities = {"lieve", "moderato", "grave"}
     valid_zones = {"frontale", "laterale_sinistro", "posteriore", "laterale_destro", "superiore"}
+    # usura / sporcizia are reported only when severity is "grave".
+    grave_only_types = {"usura", "sporcizia"}
 
     validated = []
     for d in damages:
@@ -154,6 +223,9 @@ async def _call_openai(photos: list) -> list:
             and d.get("severity") in valid_severities
             and d.get("zone") in valid_zones
         ):
+            if d["damage_type"] in grave_only_types and d["severity"] != "grave":
+                logger.info("Dropping non-grave %s entry: %s", d["damage_type"], d)
+                continue
             validated.append(d)
         else:
             logger.warning("Skipping invalid damage entry: %s", d)
@@ -214,8 +286,15 @@ async def analyze_session(session_id: str) -> None:
                     user.remaining_calls -= 1
                     await db_session.commit()
 
+            # Resolve vehicle type to pick the right prompt
+            vehicle_type: str | None = None
+            if sess:
+                vehicle = await db_session.get(Vehicle, sess.vehicle_id)
+                if vehicle:
+                    vehicle_type = vehicle.type
+
             # Call OpenAI — NO silent fallback to mock
-            damage_list, raw_model_text = await _call_openai(photos)
+            damage_list, raw_model_text = await _call_openai(photos, vehicle_type)
 
             # Save damages
             for damage_data in damage_list:

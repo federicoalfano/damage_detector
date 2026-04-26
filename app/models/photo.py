@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer
+from sqlalchemy import Column, String, Integer, LargeBinary
 from sqlalchemy import ForeignKey
 
 from app.database import Base
@@ -12,6 +12,11 @@ class Photo(Base):
     angle_index = Column(Integer, nullable=False)
     angle_label = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
+    # Photo bytes stored in DB. Required because Render free tier disk is
+    # ephemeral — files written under data/sessions are wiped on cold restart.
+    # The disk file is still written (faster reads, AI service uses it) but
+    # the DB blob is the source of truth and is rehydrated on demand.
+    image_data = Column(LargeBinary, nullable=True)
     captured_at = Column(String, nullable=False)
     is_valid = Column(Integer, nullable=False, default=0)
     validation_message = Column(String, nullable=True)

@@ -31,9 +31,10 @@ VEHICLE_DESCRIPTIONS: dict[str, str] = {
 }
 
 VALIDATION_PROMPT = """\
-Sei un sistema di controllo qualità fotografica per una flotta di veicoli.
+Sei un sistema di controllo qualità fotografica per ispezione flotta.
 
-Il veicolo atteso in questa foto è: {vehicle_description}
+Categoria veicolo atteso: {category}
+Angolazione dichiarata della foto: {angle}
 
 Analizza l'immagine e rispondi SOLO con un oggetto JSON (nessun testo aggiuntivo):
 {{
@@ -41,22 +42,52 @@ Analizza l'immagine e rispondi SOLO con un oggetto JSON (nessun testo aggiuntivo
   "reason": "breve spiegazione in italiano"
 }}
 
-Regole:
-- "valid": true se nell'immagine è chiaramente visibile il tipo di veicolo descritto (anche parzialmente, da qualsiasi angolazione)
-- "valid": false se l'immagine mostra un veicolo completamente diverso, nessun veicolo, o è troppo sfocata/scura per identificare il soggetto
-- Sii ragionevole: non serve una corrispondenza perfetta, basta che sia riconoscibile come quel tipo di veicolo
+Regole (sii PERMISSIVO):
+- "valid": true se l'immagine mostra il tipo di veicolo giusto (es. un furgone) DA QUALSIASI MARCA/MODELLO e l'angolazione corrisponde a quella dichiarata
+- NON rifiutare perché il modello specifico non combacia (es. uno Scudo può sembrare un Peugeot Expert - è ok, condividono piattaforma)
+- L'angolazione deve corrispondere:
+  - "fronte": si vede chiaramente il muso anteriore del veicolo
+  - "retro": si vede chiaramente la parte posteriore / portellone
+  - "lato_destro": si vede il fianco destro del veicolo (porte/fiancata lato destro, orientato verso la nostra destra)
+  - "lato_sinistro": si vede il fianco sinistro del veicolo (porte/fiancata lato sinistro, orientato verso la nostra sinistra)
+- "valid": false SOLO SE:
+  - Non c'è alcun veicolo nella foto (solo asfalto, persone, oggetti non veicolari)
+  - Il tipo di veicolo è completamente sbagliato (es. atteso furgone, c'è un aereo o una moto)
+  - L'angolazione è chiaramente sbagliata (dichiarato "fronte" ma la foto mostra il retro)
+  - La foto è troppo sfocata/scura/inquadrata male per capire cosa mostra
+
+Esempi:
+- Foto di scarpe su asfalto → valid: false, reason: "Nessun veicolo visibile"
+- Foto di un Citroën Berlingo dichiarato Scudo → valid: true, reason: "Furgone commerciale, angolazione corretta"
+- Foto del retro dichiarata come "lato_sinistro" → valid: false, reason: "Angolazione non corrisponde: foto mostra il retro"
 """
 
+# Categoria per ogni vehicle type (più permissiva del modello specifico)
+VEHICLE_CATEGORIES: dict[str, str] = {
+    "piaggio": "scooter / motociclo a 3 ruote (Piaggio Liberty o simile)",
+    "ligier": "quadriciclo leggero / microcar a 4 ruote (Ligier o simile)",
+    "my_moover": "veicolo elettrico compatto urbano per consegne",
+    "scudo": "furgone commerciale di medie dimensioni",
+}
 
-async def validate_photo(file_path: str, vehicle_type: str) -> dict:
-    """Validate a photo against the expected vehicle type.
+# Italian angle labels
+ANGLE_IT = {
+    "fronte": "fronte (vista anteriore)",
+    "lato_destro": "lato destro (fiancata destra)",
+    "lato_sinistro": "lato sinistro (fiancata sinistra)",
+    "retro": "retro (vista posteriore)",
+}
+
+
+async def validate_photo(file_path: str, vehicle_type: str, angle_label: str = "") -> dict:
+    """Validate a photo against the expected vehicle category + angle.
 
     Returns {"valid": True/False, "reason": "..."}.
     If no API key is configured or vehicle type unknown, skips validation.
     """
-    description = VEHICLE_DESCRIPTIONS.get(vehicle_type)
-    if not description:
-        logger.info("No description for vehicle type '%s', skipping validation", vehicle_type)
+    category = VEHICLE_CATEGORIES.get(vehicle_type)
+    if not category:
+        logger.info("No category for vehicle type '%s', skipping validation", vehicle_type)
         return {"valid": True, "reason": "Tipo veicolo senza validazione"}
 
     if not settings.openai_api_key:
@@ -73,7 +104,10 @@ async def validate_photo(file_path: str, vehicle_type: str) -> dict:
             kwargs["base_url"] = settings.openai_base_url
         client = OpenAI(**kwargs)
 
-        prompt = VALIDATION_PROMPT.format(vehicle_description=description)
+        prompt = VALIDATION_PROMPT.format(
+            category=category,
+            angle=ANGLE_IT.get(angle_label, angle_label or "qualsiasi"),
+        )
 
         response = client.chat.completions.create(
             model=settings.openai_model,

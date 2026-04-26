@@ -14,3 +14,4 @@ class Session(Base):
     status = Column(String, nullable=False, default="in_progress")
     total_photos = Column(Integer, nullable=False)
     valid_photos = Column(Integer, nullable=False, default=0)
+    name = Column(String, nullable=True)

@@ -9,12 +9,27 @@ Sii meticoloso: è meglio un falso positivo che perdere un danno reale. Ispezion
 - Ammaccature o deformazioni di lamiera, portiere, tetto, cofano, portellone
 - Crepe, rotture o scheggiature su vetri, plastiche, fari, paraurti
 - Componenti esterni spezzati, crepati o mancanti (specchietto, copri-faro, copri-mozzo, tergicristallo, griglia, maniglia, antenna)
-- Fari/fanali crepati, rotti o con infiltrazione d'acqua
 - Pneumatici tagliati, visibilmente lisci o sgonfi
 - Ruggine visibile (non una piccola macchia, ma corrosione vera)
-- Crepe o scheggiature sul parabrezza/lunotto
+- Crepe o scheggiature sul parabrezza
 
-NON descrivere componenti specifici di modello (porte scorrevoli, terzo stop, passaruota, ecc.) che potrebbero non esistere su tutti i furgoni. Usa termini generici come "fiancata", "portellone posteriore", "paraurti", "parafango", "faro", "fanale", "specchietto", "cerchio", "pneumatico", "vetro laterale", "parabrezza", "lunotto", "maniglia", "tergicristallo".
+=== CONTROLLO FARI/FANALI (attenzione ai falsi positivi) ===
+Guarda i gruppi ottici (faro anteriore, fanale posteriore). REGOLE STRETTE:
+- Segnala un danno SOLO se vedi una linea di rottura nera/scura netta sulla plastica o un pezzo chiaramente mancante (buco nero visibile al posto del rosso/arancio).
+- NON confondere con riflessi di luce sulla lente, sporco, polvere, linee di design del faro, bordi normali, condensa leggera, sporco secco.
+- Se hai un dubbio: NON segnalare. La regola di default per i fari è "nessun danno".
+- Esempio concreto di quando segnalare: porzione visibilmente rotta con frammento mancante della lente, con il nero dietro chiaramente visibile al posto del colore (caso della sessione decc87d7 retro).
+
+=== REGOLE SUI COMPONENTI CHE POTREBBERO NON ESSERE PRESENTI ===
+Alcuni componenti potrebbero NON esistere sul furgone (dipende dal modello/versione). NON segnalarli come mancanti a priori e NON inventarli.
+Esempi di componenti da NON assumere mai presenti:
+- "lunotto posteriore" / "vetro posteriore" / "terzo stop": molti furgoni merci hanno portelloni posteriori a PANNELLO PIENO senza vetri — se non vedi vetri posteriori, NON segnalare crepe/danni su un lunotto che non esiste
+- "porta scorrevole laterale": non su tutti i furgoni
+- "passaruota in plastica", "antenna", "fendinebbia": opzionali
+
+REGOLA: segnala un danno SOLO se il componente danneggiato è EFFETTIVAMENTE VISIBILE nella foto. Mai inferire l'esistenza di un componente non visibile.
+
+Usa termini generici: "fiancata", "portellone posteriore", "paraurti", "parafango", "faro", "fanale", "specchietto", "cerchio", "pneumatico", "vetro laterale", "parabrezza", "maniglia", "tergicristallo".
 
 === REGOLE RIGIDE PER USURA E SPORCIZIA ===
 I tipi "usura" e "sporcizia" vanno usati SOLO se la condizione è GRAVE e compromette funzionalità o sicurezza:
@@ -29,7 +44,7 @@ Se hai dubbi su usura/sporcizia, NON segnalarla.
 - "frontale": muso del furgone (paraurti anteriore, cofano, griglia, fari anteriori, parabrezza)
 - "laterale_destro": fiancata destra (porte destre, vetri destri, specchietto destro, ruote destre, parafanghi destri)
 - "laterale_sinistro": fiancata sinistra (porte sinistre, vetri sinistri, specchietto sinistro, ruote sinistre, parafanghi sinistri)
-- "posteriore": coda (paraurti posteriore, portellone/porte posteriori, fanali posteriori, lunotto, targa)
+- "posteriore": coda (paraurti posteriore, portellone/porte posteriori, fanali posteriori, targa, eventuale vetro posteriore SE E SOLO SE visibile)
 - "superiore": tetto (se visibile)
 
 === TIPI DI DANNO DISPONIBILI ===

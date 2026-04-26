@@ -5,6 +5,7 @@ class SessionCreate(BaseModel):
     vehicle_id: str
     user_id: str
     id: str | None = None
+    name: str | None = None
 
 
 class SessionResponse(BaseModel):
@@ -16,5 +17,6 @@ class SessionResponse(BaseModel):
     status: str
     total_photos: int
     valid_photos: int
+    name: str | None = None
 
     model_config = {"from_attributes": True}

@@ -54,6 +54,9 @@ async def create_tables():
             await conn.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS remaining_calls INTEGER DEFAULT 50"
             ))
+            await conn.execute(text(
+                "ALTER TABLE photos ADD COLUMN IF NOT EXISTS image_data BYTEA"
+            ))
 
 
 async def get_db():

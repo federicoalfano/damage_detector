@@ -1,7 +1,6 @@
 import uuid
 
 import bcrypt
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.vehicle import Vehicle
@@ -9,10 +8,30 @@ from app.models.user import User
 
 
 SEED_VEHICLES = [
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-001")), "model": "Piaggio Liberty", "plate": "AB12345", "type": "piaggio"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-ligier-001")), "model": "Ligier", "plate": "EF11223", "type": "ligier"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-mymoover-001")), "model": "My Moover", "plate": "IJ77889", "type": "my_moover"},
-    {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-scudo-001")), "model": "Fiat Scudo", "plate": "MN22334", "type": "scudo"},
+    {
+        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-piaggio-001")),
+        "model": "Piaggio Liberty",
+        "plate": "AB12345",
+        "type": "piaggio",
+    },
+    {
+        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-ligier-001")),
+        "model": "Ligier",
+        "plate": "EF11223",
+        "type": "ligier",
+    },
+    {
+        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-mymoover-001")),
+        "model": "My Moover",
+        "plate": "IJ77889",
+        "type": "my_moover",
+    },
+    {
+        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "vehicle-scudo-001")),
+        "model": "Fiat Scudo",
+        "plate": "MN22334",
+        "type": "scudo",
+    },
 ]
 
 SEED_USER_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "user-operatore"))
@@ -23,52 +42,70 @@ SEED_TEST_USER_ID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "user-test"))
 SEED_TEST_USER_USERNAME = "test"
 SEED_TEST_USER_PASSWORD = "test123"
 
+_SEED_USERS = [
+    {
+        "id": SEED_USER_ID,
+        "username": SEED_USER_USERNAME,
+        "password": SEED_USER_PASSWORD,
+    },
+    {
+        "id": SEED_TEST_USER_ID,
+        "username": SEED_TEST_USER_USERNAME,
+        "password": SEED_TEST_USER_PASSWORD,
+    },
+]
 
-async def seed_data(session: AsyncSession) -> None:
-    # Check if seed is up-to-date (exactly 4 vehicles = 1 per type)
-    from sqlalchemy import func
-    count_result = await session.execute(select(func.count()).select_from(Vehicle))
-    vehicle_count = count_result.scalar() or 0
-    if vehicle_count == len(SEED_VEHICLES):
-        # Verify it's the right set
-        result = await session.execute(
-            select(Vehicle).where(Vehicle.model == "Piaggio Liberty").limit(1)
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+async def _upsert_vehicle(session: AsyncSession, payload: dict[str, str]) -> None:
+    vehicle = await session.get(Vehicle, payload["id"])
+    if vehicle is None:
+        session.add(Vehicle(**payload))
+        return
+
+    vehicle.model = payload["model"]
+    vehicle.plate = payload["plate"]
+    vehicle.type = payload["type"]
+
+
+async def _upsert_user(
+    session: AsyncSession,
+    payload: dict[str, str],
+    *,
+    reset_existing: bool,
+) -> None:
+    user = await session.get(User, payload["id"])
+    if user is None:
+        user = User(
+            id=payload["id"],
+            username=payload["username"],
+            password_hash=_hash_password(payload["password"]),
+            enabled_until="2026-12-31",
+            remaining_calls=50,
         )
-        if result.scalars().first() is not None:
-            return
+        session.add(user)
+        return
 
-    # Remove all old data (respecting FK order: damages -> analyses -> photos -> sessions -> vehicles/users)
-    from sqlalchemy import delete
-    from app.models.analysis import Damage, AnalysisResult
-    from app.models.photo import Photo
-    from app.models.session import Session
-    await session.execute(delete(Damage))
-    await session.execute(delete(AnalysisResult))
-    await session.execute(delete(Photo))
-    await session.execute(delete(Session))
-    await session.execute(delete(Vehicle))
-    await session.execute(delete(User))
-    await session.flush()
+    user.username = payload["username"]
+    if reset_existing:
+        user.password_hash = _hash_password(payload["password"])
+        user.enabled_until = "2026-12-31"
+        user.remaining_calls = 50
 
-    for v in SEED_VEHICLES:
-        session.add(Vehicle(**v))
 
-    password_hash = bcrypt.hashpw(SEED_USER_PASSWORD.encode(), bcrypt.gensalt()).decode()
-    session.add(User(
-        id=SEED_USER_ID,
-        username=SEED_USER_USERNAME,
-        password_hash=password_hash,
-        enabled_until="2026-12-31",
-        remaining_calls=50,
-    ))
+async def seed_data(session: AsyncSession, *, reset_existing: bool = False) -> None:
+    """Create or update deterministic seed rows without deleting user data.
 
-    test_password_hash = bcrypt.hashpw(SEED_TEST_USER_PASSWORD.encode(), bcrypt.gensalt()).decode()
-    session.add(User(
-        id=SEED_TEST_USER_ID,
-        username=SEED_TEST_USER_USERNAME,
-        password_hash=test_password_hash,
-        enabled_until="2026-12-31",
-        remaining_calls=50,
-    ))
+    Production startup should not wipe sessions or reset quotas. Tests can pass
+    reset_existing=True to force deterministic credentials and counters.
+    """
+    for vehicle in SEED_VEHICLES:
+        await _upsert_vehicle(session, vehicle)
+
+    for user in _SEED_USERS:
+        await _upsert_user(session, user, reset_existing=reset_existing)
 
     await session.commit()

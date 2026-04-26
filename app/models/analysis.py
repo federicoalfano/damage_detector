@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey
+from sqlalchemy import Column, String, ForeignKey, Float
 
 from app.database import Base
 
@@ -23,3 +23,4 @@ class Damage(Base):
     zone = Column(String, nullable=False)
     description = Column(String, nullable=True)
     bounding_box = Column(String, nullable=True)
+    confidence = Column(Float, nullable=True)  # 0.0-1.0 (votes/passes or YOLO prob)

@@ -4,6 +4,7 @@ import uuid as uuid_mod
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse, Response
 import shutil
 
 from sqlalchemy import select, delete
@@ -51,6 +52,7 @@ async def create_session(payload: SessionCreate):
             status="in_progress",
             total_photos=4,
             valid_photos=0,
+            name=payload.name,
         )
         session.add(new_session)
         await session.commit()
@@ -83,8 +85,12 @@ async def upload_photo(
         file_path = os.path.join(session_dir, filename)
 
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        try:
+            with open(file_path, "wb") as f:
+                f.write(content)
+        except OSError:
+            # Disk write may fail on read-only filesystems; DB blob is enough.
+            pass
 
         # Photo validation disabled — saves one API call per photo
         # vehicle_type = vehicle.type if vehicle else ""
@@ -93,13 +99,15 @@ async def upload_photo(
         #     os.remove(file_path)
         #     raise HTTPException(status_code=422, detail=f"Foto non valida: {validation['reason']}")
 
-        # Create photo record
+        # Create photo record. Image bytes also stored in DB so the photo
+        # survives Render's ephemeral disk wipes.
         photo = Photo(
             id=photo_id,
             session_id=session_id,
             angle_index=angle_index,
             angle_label=angle_label,
             file_path=file_path,
+            image_data=content,
             captured_at=datetime.now(timezone.utc).isoformat(),
             is_valid=1,
             upload_status="uploaded",
@@ -107,7 +115,7 @@ async def upload_photo(
         db_session.add(photo)
         await db_session.commit()
 
-    return success_response(data={"photo_id": photo_id})
+    return success_response(data={"photo_id": photo_id, "size_bytes": len(content)})
 
 
 @router.post("/{session_id}/complete")
@@ -309,6 +317,35 @@ async def get_session_results(session_id: str):
         return success_response(data=response_data)
 
 
+@router.get("/{session_id}/photos/{photo_id}")
+async def get_photo_file(session_id: str, photo_id: str):
+    """Stream the JPEG file for a photo. Tries disk first (faster, supports
+    HTTP range), falls back to DB blob when the disk file was wiped (Render
+    free tier ephemeral storage). Auth via API key dependency."""
+    async with async_session() as db_session:
+        photo = await db_session.get(Photo, photo_id)
+        if not photo or photo.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Foto non trovata")
+        file_path = photo.file_path
+        blob = photo.image_data
+
+    if file_path and os.path.exists(file_path):
+        return FileResponse(file_path, media_type="image/jpeg")
+
+    if blob:
+        # Rehydrate disk cache opportunistically so subsequent reads are fast.
+        if file_path:
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "wb") as f:
+                    f.write(blob)
+            except OSError:
+                pass
+        return Response(content=bytes(blob), media_type="image/jpeg")
+
+    raise HTTPException(status_code=404, detail="File foto non disponibile")
+
+
 @router.get("/{session_id}/debug-photos")
 async def debug_photos(session_id: str):
     async with async_session() as db_session:
@@ -323,14 +360,16 @@ async def debug_photos(session_id: str):
 
         info = []
         for p in photos:
-            exists = os.path.exists(p.file_path)
+            exists = os.path.exists(p.file_path) if p.file_path else False
             size = os.path.getsize(p.file_path) if exists else 0
+            blob_size = len(p.image_data) if p.image_data else 0
             info.append({
                 "id": p.id,
                 "angle": p.angle_label,
                 "path": p.file_path,
-                "exists": exists,
-                "size_bytes": size,
+                "disk_exists": exists,
+                "disk_size_bytes": size,
+                "blob_size_bytes": blob_size,
             })
 
     return success_response(data=info)
@@ -369,8 +408,11 @@ async def reanalyze_session(session_id: str, files: list[UploadFile] = File(defa
                 file_path = os.path.join(session_dir, filename)
 
                 content = await file.read()
-                with open(file_path, "wb") as f:
-                    f.write(content)
+                try:
+                    with open(file_path, "wb") as f:
+                        f.write(content)
+                except OSError:
+                    pass
 
                 # Extract angle info from filename (phone sends angle_label as filename)
                 angle_label = file.filename.rsplit('.', 1)[0] if file.filename else f"angle_{i}"
@@ -381,6 +423,7 @@ async def reanalyze_session(session_id: str, files: list[UploadFile] = File(defa
                     angle_index=i,
                     angle_label=angle_label,
                     file_path=file_path,
+                    image_data=content,
                     captured_at=datetime.now(timezone.utc).isoformat(),
                     is_valid=1,
                     upload_status="uploaded",

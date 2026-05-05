@@ -96,7 +96,23 @@ async def validate_photo(file_path: str, vehicle_type: str, angle_label: str = "
 
     try:
         with open(file_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
+            raw = f.read()
+        # Applica EXIF orientation (Pixel/Android salvano i pixel ruotati e
+        # marcano la rotazione solo nei tag EXIF). Il modello di validazione
+        # ignora EXIF: senza transpose vede l'angolo sbagliato e marca le
+        # foto come "angolazione errata".
+        try:
+            from io import BytesIO
+            from PIL import Image, ImageOps
+            with Image.open(BytesIO(raw)) as im:
+                transposed = ImageOps.exif_transpose(im)
+                buf = BytesIO()
+                transposed.convert("RGB").save(buf, format="JPEG", quality=85)
+                data = buf.getvalue()
+        except Exception as e:
+            logger.warning("EXIF transpose failed in validator: %s — using raw", e)
+            data = raw
+        b64 = base64.b64encode(data).decode("utf-8")
 
         from openai import OpenAI
         kwargs = {"api_key": settings.openai_api_key}

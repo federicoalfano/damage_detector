@@ -95,6 +95,8 @@ async def test_call_openai_issues_one_request_per_photo(monkeypatch):
     monkeypatch.setattr(ai_service.settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(ai_service.settings, "openai_base_url", "")
     monkeypatch.setattr(ai_service.settings, "openai_model", "gpt-4o-mini")
+    # This test asserts the per-photo routing invariant; pin to single pass.
+    monkeypatch.setattr(ai_service.settings, "vlm_passes", 1)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         photos = [
@@ -148,6 +150,54 @@ async def test_call_openai_issues_one_request_per_photo(monkeypatch):
         assert zones == {"frontale", "laterale_destro", "posteriore"}
         for angle in ("fronte", "lato_destro", "lato_sinistro", "retro"):
             assert f"=== {angle} ===" in raw
+
+
+@pytest.mark.asyncio
+async def test_call_openai_multipass_unions_and_scores(monkeypatch):
+    """Multi-pass keeps singleton findings (recall) and scores by agreement."""
+    monkeypatch.setattr(ai_service.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(ai_service.settings, "openai_base_url", "")
+    monkeypatch.setattr(ai_service.settings, "openai_model", "gpt-4o-mini")
+    monkeypatch.setattr(ai_service.settings, "vlm_passes", 3)
+
+    # 3 passes for one photo: graffio in all 3 (severity rising), a critical
+    # crepa in only 1 — the nondeterministic case multi-pass exists to catch.
+    pass_payloads = [
+        '{"damages": [{"damage_type": "graffio", "severity": "lieve", "zone": "frontale", "description": "graffio cofano"}]}',
+        '{"damages": ['
+        '{"damage_type": "graffio", "severity": "lieve", "zone": "frontale", "description": "graffio cofano"},'
+        '{"damage_type": "crepa", "severity": "moderato", "zone": "frontale", "description": "faro anteriore crepa"}]}',
+        '{"damages": [{"damage_type": "graffio", "severity": "moderato", "zone": "frontale", "description": "graffio cofano"}]}',
+    ]
+    calls = {"n": 0}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            i = calls["n"]
+            calls["n"] += 1
+            return _fake_openai_response(pass_payloads[i % len(pass_payloads)])
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = FakeChat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        photos = [_make_fake_photo(tmpdir, "fronte", 0)]
+        with patch("openai.OpenAI", FakeClient):
+            damages, _ = await _call_openai(photos, vehicle_type="piaggio")
+
+    assert calls["n"] == 3  # 3 passes for the single photo
+    by_type = {d["damage_type"]: d for d in damages}
+    # Singleton critical finding must survive (recall-first, never consensus-filtered).
+    assert set(by_type) == {"graffio", "crepa"}
+    # graffio in 3/3 -> confidence 1.0; crepa in 1/3 -> 0.33.
+    assert by_type["graffio"]["confidence"] == 1.0
+    assert by_type["crepa"]["confidence"] == 0.33
+    # severity escalates to the most severe reading across passes.
+    assert by_type["graffio"]["severity"] == "moderato"
 
 
 @pytest.mark.asyncio

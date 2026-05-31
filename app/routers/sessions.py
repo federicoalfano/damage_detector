@@ -1,6 +1,6 @@
-import asyncio
 import os
 import uuid as uuid_mod
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -16,8 +16,7 @@ from app.models.photo import Photo
 from app.models.vehicle import Vehicle
 from app.models.user import User
 from app.schemas.session import SessionCreate, SessionResponse
-from app.services.ai_service import analyze_session
-from app.services.photo_validator import validate_photo
+from app.services.ai_service import spawn_analysis
 from app.utils.response import success_response
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -140,8 +139,8 @@ async def complete_session(session_id: str):
 
         data = SessionResponse.model_validate(sess).model_dump()
 
-    # Trigger AI analysis asynchronously
-    asyncio.create_task(analyze_session(session_id))
+    # Trigger AI analysis asynchronously (GC-safe, ref held in ai_service)
+    spawn_analysis(session_id)
 
     return success_response(data=data)
 
@@ -173,28 +172,34 @@ async def mark_incomplete(session_id: str):
 @router.get("")
 async def list_sessions():
     async with async_session() as db_session:
-        result = await db_session.execute(select(Session))
-        sessions = result.scalars().all()
+        sessions = (await db_session.execute(select(Session))).scalars().all()
+
+        # Bulk-load analyses + damages to avoid an N+1 (was 1 + 2N queries).
+        analyses = (await db_session.execute(select(AnalysisResult))).scalars().all()
+        analysis_by_session: dict[str, AnalysisResult] = {}
+        for a in analyses:
+            analysis_by_session.setdefault(a.session_id, a)
+
+        completed_ids = [a.id for a in analyses if a.status == "completed"]
+        dmg_by_analysis: dict[str, list] = defaultdict(list)
+        if completed_ids:
+            damages = (await db_session.execute(
+                select(Damage).where(Damage.analysis_id.in_(completed_ids))
+            )).scalars().all()
+            for d in damages:
+                dmg_by_analysis[d.analysis_id].append(d)
 
         data = []
         for s in sessions:
             session_data = SessionResponse.model_validate(s).model_dump()
-
-            # Fetch analysis info
-            ar_result = await db_session.execute(
-                select(AnalysisResult).where(AnalysisResult.session_id == s.id)
-            )
-            analysis = ar_result.scalars().first()
+            analysis = analysis_by_session.get(s.id)
 
             damage_types: list[str] = []
             damage_count = 0
             if analysis and analysis.status == "completed":
-                dmg_result = await db_session.execute(
-                    select(Damage).where(Damage.analysis_id == analysis.id)
-                )
-                damages = dmg_result.scalars().all()
-                damage_count = len(damages)
-                damage_types = list({d.damage_type for d in damages})
+                dmgs = dmg_by_analysis.get(analysis.id, [])
+                damage_count = len(dmgs)
+                damage_types = list({d.damage_type for d in dmgs})
 
             session_data["analysis_status"] = analysis.status if analysis else "pending"
             session_data["damage_types"] = damage_types
@@ -434,8 +439,8 @@ async def reanalyze_session(session_id: str, files: list[UploadFile] = File(defa
         sess.status = "uploaded"
         await db_session.commit()
 
-    # Trigger new analysis
-    asyncio.create_task(analyze_session(session_id))
+    # Trigger new analysis (GC-safe, ref held in ai_service)
+    spawn_analysis(session_id)
 
     return success_response(data={"message": "Rianalisi avviata"})
 

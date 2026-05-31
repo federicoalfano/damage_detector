@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = "o4-mini"
+    # Independent VLM passes per photo, merged by union (recall-first) with
+    # agreement -> confidence. 1 = single pass (legacy). 3 = recommended for
+    # critical-damage recall. Cost/latency scale ~linearly with this.
+    vlm_passes: int = 3
     data_dir: str = "./data"
     max_photo_size_bytes: int = 2 * 1024 * 1024  # 2MB
     cors_origins: list[str] = ["http://localhost:8000", "http://192.168.1.200:8000"]

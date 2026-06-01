@@ -26,6 +26,16 @@ async def lifespan(app: FastAPI):
         "Active VLM: model=%s base_url=%s",
         settings.openai_model, settings.openai_base_url or "(OpenAI default)",
     )
+    # Loud, non-silent guard: an empty api_key disables ALL auth (including the
+    # DELETE / reanalyze routes that spend paid VLM quota). Surface a forgotten
+    # env var instead of silently shipping an open instance.
+    if not settings.api_key:
+        msg = ("API_KEY is empty — the API is OPEN (no auth) and cost/destructive "
+               "endpoints are exposed. Set API_KEY in production.")
+        if settings.require_auth:
+            logger.error("REFUSING INSECURE DEFAULTS: %s (REQUIRE_AUTH=true)", msg)
+            raise RuntimeError(msg)
+        logger.error("SECURITY: %s", msg)
     # Resume any analyses orphaned by a previous restart (Render free tier).
     await recover_pending_analyses()
     yield
@@ -41,7 +51,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    # Auth is a header (X-API-Key), not a cookie, so credentialed CORS is not
+    # needed and pairing it with permissive origins is a footgun.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

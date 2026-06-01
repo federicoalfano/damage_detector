@@ -19,6 +19,19 @@ from app.models.vehicle import Vehicle
 
 logger = logging.getLogger(__name__)
 
+# Pillow is load-bearing: every VLM call goes through EXIF orientation + JPEG
+# re-encode, and the tiled detail pass crops/upscales with it. If it is missing
+# the code silently falls back to raw (often sideways) bytes and recall collapses
+# — so fail LOUD at import instead of degrading invisibly.
+try:  # pragma: no cover - environment guard
+    import PIL  # noqa: F401
+except Exception:  # pragma: no cover
+    logger.error(
+        "Pillow (PIL) is NOT installed — photos will be sent WITHOUT EXIF rotation "
+        "and the tiled detail pass is disabled. Detection quality will be severely "
+        "degraded. Add 'Pillow>=10' to requirements.txt."
+    )
+
 PROMPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "prompts",
@@ -138,59 +151,104 @@ def _encode_image_base64(file_path: str, fallback_bytes: bytes | None = None) ->
     return b64
 
 
+def _damages_from_obj(obj) -> list:
+    """Pull the damages array out of a parsed object, tolerating key variance."""
+    if not isinstance(obj, dict):
+        return []
+    for key in ("damages", "danni"):
+        v = obj.get(key)
+        if isinstance(v, list):
+            return v
+    return []
+
+
+def _balanced_objects(text: str, start: int = 0):
+    """Yield every top-level balanced {...} substring from `text` (handles strings/escapes)."""
+    depth = 0
+    in_str = False
+    esc = False
+    obj_start = -1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and obj_start >= 0:
+                    yield text[obj_start:i + 1]
+                    obj_start = -1
+
+
+def _parse_top_object(text: str):
+    """Return the first parseable top-level JSON object (dict), or None.
+
+    Used to recover the full response (damages + `checklist`) — not just damages.
+    """
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    for blob in _balanced_objects(text):
+        try:
+            parsed = json.loads(blob)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _extract_damages(text: str) -> list:
     """Parse JSON damages from model output, tolerating truncation and extra text.
 
     Strategy:
-      1. Try strict json.loads of the whole text.
-      2. If that fails, extract the first balanced { ... } object and parse it.
-      3. If that also fails (e.g. truncation), recover by parsing the inner array
-         entry-by-entry up to the last complete object.
+      1. Strict json.loads of the whole text.
+      2. First balanced {...} object that parses.
+      3. Truncation recovery: brace-balanced scan for individual damage entries
+         (handles nested objects, unlike the old single-level regex), accepting
+         either an English ('damage_type') or Italian ('tipo'/'tipo_danno') key.
     """
     try:
         parsed = json.loads(text)
-        return parsed.get("damages", parsed.get("danni", []))
+        dmgs = _damages_from_obj(parsed)
+        if dmgs or (isinstance(parsed, dict) and ("damages" in parsed or "danni" in parsed)):
+            return dmgs
     except json.JSONDecodeError:
         pass
 
-    # Find balanced outer object
-    start = text.find("{")
-    if start >= 0:
-        depth = 0
-        in_str = False
-        esc = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-            else:
-                if ch == '"':
-                    in_str = True
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            parsed = json.loads(text[start:i + 1])
-                            return parsed.get("damages", parsed.get("danni", []))
-                        except json.JSONDecodeError:
-                            break
-
-    # Truncation recovery: extract individual {...} damage entries
-    damages: list = []
-    for m in re.finditer(r"\{[^{}]*\}", text):
+    # First balanced outer object that parses cleanly.
+    for blob in _balanced_objects(text):
         try:
-            entry = json.loads(m.group(0))
-            if isinstance(entry, dict) and "damage_type" in entry:
-                damages.append(entry)
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            break  # truncated mid-object — fall through to entry recovery
+        if isinstance(parsed, dict) and ("damages" in parsed or "danni" in parsed):
+            return _damages_from_obj(parsed)
+
+    # Truncation recovery: brace-balanced scan for individual damage entries.
+    damages: list = []
+    for blob in _balanced_objects(text):
+        try:
+            entry = json.loads(blob)
         except json.JSONDecodeError:
             continue
+        if isinstance(entry, dict) and any(k in entry for k in ("damage_type", "tipo", "tipo_danno")):
+            damages.append(entry)
     if damages:
         logger.warning("Recovered %d damages from malformed JSON via fallback parser", len(damages))
         return damages
@@ -283,22 +341,103 @@ _VALID_ZONES = {"frontale", "laterale_sinistro", "posteriore", "laterale_destro"
 _GRAVE_ONLY_TYPES = {"usura", "sporcizia"}
 
 
-def _validate_damages(damages: list) -> list:
-    """Drop entries that don't match the allowed enums or violate grave-only rules."""
+# Loose model phrasings -> canonical zone enum. The angle is known server-side,
+# so zone must NEVER be a drop criterion (it was silently discarding valid
+# pezzo_mancante findings whose zone the model phrased freely).
+_ZONE_SYNONYMS = {
+    "anteriore": "frontale", "frontale": "frontale", "fronte": "frontale",
+    "davanti": "frontale", "muso": "frontale",
+    "posteriore": "posteriore", "retro": "posteriore", "dietro": "posteriore",
+    "coda": "posteriore",
+    "laterale_destro": "laterale_destro", "laterale destra": "laterale_destro",
+    "destro": "laterale_destro", "destra": "laterale_destro", "lato_destro": "laterale_destro",
+    "laterale_sinistro": "laterale_sinistro", "laterale sinistra": "laterale_sinistro",
+    "sinistro": "laterale_sinistro", "sinistra": "laterale_sinistro", "lato_sinistro": "laterale_sinistro",
+    "superiore": "superiore", "tetto": "superiore",
+}
+
+# Functional / safety-relevant components: a missing or broken one is never
+# "lieve" — enforce a severity floor so the costliest findings can't hide among
+# cosmetic noise. Lighting/visibility components escalate to "grave".
+_SAFETY_KW = (
+    "faro", "fari", "fanale", "fanali", "fanal", "luce", "stop", "lente",
+    "specchiett", "retrovisor", "vetro", "parabrezza", "lunotto", "ruota",
+    "pneumatic", "gomma", "targa",
+)
+_FUNCTIONAL_KW = _SAFETY_KW + ("paraurti", "portellone", "porta", "portiera", "maniglia", "cofano")
+
+
+def _normalize_zone(zone, angle_label: str | None) -> str:
+    """Map a model-supplied zone to a canonical enum, defaulting from the known angle."""
+    if zone in _VALID_ZONES:
+        return zone
+    if isinstance(zone, str):
+        mapped = _ZONE_SYNONYMS.get(zone.strip().lower())
+        if mapped:
+            return mapped
+    return ZONE_BY_ANGLE.get(angle_label or "", "frontale")
+
+
+def _apply_severity_floor(d: dict) -> None:
+    """Raise severity in-place for missing/broken functional components."""
+    dt = d.get("damage_type")
+    if dt not in ("pezzo_mancante", "rottura"):
+        return
+    text = ((d.get("description") or "") + " " + str(d.get("componente") or "")).lower()
+    is_safety = any(k in text for k in _SAFETY_KW)
+    floor = "grave" if is_safety else "moderato"
+    if _SEV_RANK.get(d.get("severity"), 0) < _SEV_RANK[floor]:
+        d["severity"] = floor
+
+
+def _validate_damages(damages: list, angle_label: str | None = None) -> list:
+    """Validate enums and grave-only rules. Zone is DEFAULTED from the known angle
+    (never a drop criterion) so freely-phrased pezzo_mancante findings survive."""
     validated: list = []
     for d in damages:
-        if (
-            d.get("damage_type") in _VALID_DAMAGE_TYPES
-            and d.get("severity") in _VALID_SEVERITIES
-            and d.get("zone") in _VALID_ZONES
-        ):
-            if d["damage_type"] in _GRAVE_ONLY_TYPES and d["severity"] != "grave":
-                logger.info("Dropping non-grave %s entry: %s", d["damage_type"], d)
-                continue
-            validated.append(d)
-        else:
-            logger.warning("Skipping invalid damage entry: %s", d)
+        if d.get("damage_type") not in _VALID_DAMAGE_TYPES or d.get("severity") not in _VALID_SEVERITIES:
+            logger.warning("Skipping invalid damage entry (type/severity): %s", d)
+            continue
+        if d["damage_type"] in _GRAVE_ONLY_TYPES and d["severity"] != "grave":
+            logger.info("Dropping non-grave %s entry: %s", d["damage_type"], d)
+            continue
+        d["zone"] = _normalize_zone(d.get("zone"), angle_label)
+        _apply_severity_floor(d)
+        validated.append(d)
     return validated
+
+
+def _damages_from_checklist(obj, angle_label: str | None) -> list:
+    """Synthesize pezzo_mancante findings from the model's component `checklist`.
+
+    The per-angle scudo prompts force the model to declare each component
+    ok|danno|mancante|non_visibile|non_presente, but production code never read
+    it — every `mancante` was silently discarded. This is the structural backstop
+    for missing-part recall: turn each `mancante` into a pezzo_mancante damage.
+    """
+    if not isinstance(obj, dict):
+        return []
+    checklist = obj.get("checklist")
+    if not isinstance(checklist, dict):
+        return []
+    zone = ZONE_BY_ANGLE.get(angle_label or "", "frontale")
+    out: list = []
+    for comp, status in checklist.items():
+        if not isinstance(status, str) or status.strip().lower() != "mancante":
+            continue
+        comp_name = str(comp).replace("_", " ")
+        is_safety = any(k in comp_name.lower() for k in _SAFETY_KW)
+        out.append({
+            "damage_type": "pezzo_mancante",
+            "severity": "grave" if is_safety else "moderato",
+            "zone": zone,
+            "description": f"{comp_name} mancante (da checklist)",
+            "confidence": 0.6,
+            "needs_review": True,
+        })
+    if out:
+        logger.info("Checklist backstop angle=%s: +%d pezzo_mancante from `mancante` statuses", angle_label, len(out))
+    return out
 
 
 # --- Stage-2 zoom verification (bbox-guided crop) -----------------------
@@ -308,29 +447,89 @@ ZONE_BY_ANGLE = {
 }
 # Components whose damage is resolution-sensitive -> flagged "da verificare".
 _LIGHT_KW = ("faro", "fari", "fanale", "fanali", "fanal", "luce", "stop", "lente")
+
+# Tile-pass guardrail: regions that are NOT the van. Unambiguous non-vehicle
+# terms only — deliberately EXCLUDES livrea/scritta/logo/sporco, which legitimately
+# appear as damage *landmarks* ("ammaccatura sotto la livrea gialla").
+_BACKGROUND_KW = (
+    "asfalt", "strada", "suolo", "terreno", "marciapied", "carreggiata", "parcheggio",
+    "muro", "parete", "edificio", "palazzo", "capannone", "sfondo", "cielo", "nuvol",
+    "erba", "prato", "vegetazion", "albero", "siepe",
+    "altro veicolo", "altra auto", "altra vettura", "veicolo accanto", "auto accanto",
+    "linea bianca", "strisce a terra", "segnaletica",
+)
+
+# Dedup stop-words. NOTE: side words (destro/sinistro/anteriore/posteriore) are
+# deliberately NOT here — they discriminate symmetric L/R components and dropping
+# them merged distinct findings. Generic surfaces are added so they never become
+# the dedup key.
 _NOUN_STOP = {
-    "sulla", "della", "parte", "lato", "destro", "sinistro", "anteriore", "posteriore",
-    "inferiore", "superiore", "furgone", "veicolo", "presenta", "visibile", "componente",
+    "sulla", "della", "delle", "dello", "parte", "lato", "zona", "area",
+    "inferiore", "superiore", "centrale", "furgone", "veicolo", "presenta",
+    "visibile", "evidente", "componente", "carrozzeria", "pannello", "plastica",
+    "fiancata", "porzione", "regione", "verificare", "danno", "danni",
 }
+
+# crepa and rottura describe the same physical break -> one dedup class so the
+# same cracked lens reported as both is collapsed (keep the more severe label).
+_TYPE_CLASS = {"crepa": "frattura", "rottura": "frattura"}
+
+# Map a described component to its true zone, so a wrap-around tail light seen in
+# a SIDE photo is recorded as 'posteriore', not 'laterale_*'.
+_COMP_ZONE = (
+    (("fanale", "fanali", "lunotto", "portellone", "terzo stop", "tergilunotto",
+      "targa posteriore", "paraspruzzi", "catarifrangent"), "posteriore"),
+    (("faro", "fari", "cofano", "griglia", "mascherina", "parabrezza", "fendinebbia",
+      "presa aria", "targa anteriore"), "frontale"),
+)
+_SIDE_COMP_KW = ("portiera", "porta", "fiancata", "parafango", "passaruota",
+                 "modanatura", "sottoporta", "pannello laterale", "specchiett", "maniglia")
+
+
+def _zone_from_component(description: str, angle_label: str | None) -> str:
+    """Infer zone from the named component; fall back to the photo angle."""
+    t = (description or "").lower()
+    for kws, z in _COMP_ZONE:
+        if any(k in t for k in kws):
+            return z
+    if any(k in t for k in _SIDE_COMP_KW):
+        if "sinistr" in t:
+            return "laterale_sinistro"
+        if "destr" in t:
+            return "laterale_destro"
+    return ZONE_BY_ANGLE.get(angle_label or "", "frontale")
 
 # Deterministic detail pass: VLM bbox grounding proved unreliable on 720p van
 # photos (boxes landed on blank panels), so instead we tile the photo into an
 # overlapping grid, upscale each tile, and inspect it on its own. This reliably
 # puts small damage (cracked light lens, broken lower bumper) in front of the
 # model at usable scale.
+# Reference-aware tile prompt. The detail pass now ships THREE images per tile:
+# A = whole-vehicle context thumbnail, B = the SAME region on the integro
+# reference (when available), C = the upscaled region to inspect. Diffing C
+# against B on-the-van is what kills the 'asfalto con linea bianca' class of
+# false positive AND makes a missing component (present in B, gone in C)
+# detectable at usable resolution.
 _TILE_PROMPT = (
-    "Vedi una PORZIONE INGRANDITA del {ang} di un furgone commerciale. Ispeziona SOLO ciò che è visibile "
-    "in questa porzione. Cerca danni STRUTTURALI: fari/fanali con lente crepata/spaccata o frammento "
-    "mancante; paraurti o plastica inferiore rotta/strappata/MANCANTE; ammaccature evidenti; graffi/rigature "
-    "profonde; vetri crepati; specchietti/maniglie rotti o mancanti. "
-    "IGNORA: sfondo, altri veicoli, ombre, sporco/polvere, riflessi di luce, livrea/scritte/loghi. "
-    "NON segnalare danni dubbi o difetti estetici minimi. "
+    "Sei un ispettore di furgoni commerciali. Stai esaminando UNA REGIONE del {ang}. "
+    "IMMAGINE A = contesto dell'intero veicolo (bassa risoluzione). "
+    "IMMAGINE B = la STESSA regione su un esemplare INTEGRO di riferimento (può essere assente). "
+    "IMMAGINE C = la regione INGRANDITA da ispezionare ORA. "
+    "Segnala un danno SOLO se in C c'è un peggioramento REALE rispetto a B ED è SULLA CARROZZERIA DEL FURGONE. "
+    "Se un componente è presente e integro in B ma in C è ASSENTE o frammentato => pezzo_mancante. "
+    "Cerca: fari/fanali con lente crepata/spaccata o frammento mancante; paraurti o plastica inferiore "
+    "rotta/strappata/MANCANTE; ammaccature evidenti; graffi/rigature profonde; vetri crepati; "
+    "specchietti/maniglie rotti o mancanti. "
+    "Restituisci [] se la regione è prevalentemente: asfalto/strada/suolo/marciapiede, cielo, vegetazione, "
+    "ALTRI veicoli, muro/edificio di sfondo, ombre, riflessi, sporco/polvere, oppure solo livrea/scritte/loghi senza danno. "
+    "NON segnalare difetti estetici minimi o dubbi. "
     "Rispondi SOLO JSON {{\"damages\":[{{\"damage_type\":\"graffio|ammaccatura|crepa|rottura|pezzo_mancante\","
     "\"severity\":\"lieve|moderato|grave\",\"componente\":\"<nome>\",\"description\":\"componente + cosa\"}}]}}. "
     "Se nulla: {{\"damages\":[]}}."
 )
 _TILE_OVERLAP = 0.20
 _TILE_UPSCALE = 2.0
+_CONTEXT_THUMB_MAX = 512  # longest side of the whole-frame context thumbnail
 
 
 def _pil_from_source(file_path: str, fallback_bytes: bytes | None = None):
@@ -360,19 +559,31 @@ def _pil_to_b64(im, quality: int = 90) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def _noun_key(description: str) -> str:
-    for w in re.findall(r"[a-zàèéìòù]{4,}", (description or "").lower()):
-        if w not in _NOUN_STOP:
-            return w
-    return ""
+def _salient_nouns(description: str) -> frozenset:
+    """Discriminating words (>=4 chars). Side words are KEPT so symmetric L/R
+    components ('fanale ... sinistro' vs '... destro') stay distinct."""
+    return frozenset(
+        w for w in re.findall(r"[a-zàèéìòù]{4,}", (description or "").lower())
+        if w not in _NOUN_STOP
+    )
+
+
+def _type_class(damage_type) -> str:
+    return _TYPE_CLASS.get(damage_type, damage_type)
+
+
+def _dedup_key(d: dict) -> tuple:
+    """(type-class, zone, salient-noun-set). crepa/rottura collapse to one class;
+    the noun set keeps left/right twins and distinct components apart."""
+    return (_type_class(d.get("damage_type")), d.get("zone"), _salient_nouns(d.get("description", "")))
 
 
 def _merge_damages(base: list, extra: list) -> list:
-    """Append extra damages, dropping near-duplicates by (type, zone, first noun)."""
+    """Append extra damages, dropping near-duplicates by _dedup_key."""
     out = list(base)
-    seen = {(d.get("damage_type"), d.get("zone"), _noun_key(d.get("description", ""))) for d in out}
+    seen = {_dedup_key(d) for d in out}
     for d in extra:
-        k = (d.get("damage_type"), d.get("zone"), _noun_key(d.get("description", "")))
+        k = _dedup_key(d)
         if k not in seen:
             out.append(d)
             seen.add(k)
@@ -383,7 +594,7 @@ _SEV_RANK = {"lieve": 1, "moderato": 2, "grave": 3}
 
 
 def _merge_passes(pass_results: list[list[dict]], n_passes: int) -> list[dict]:
-    """Union damages across N independent passes; dedup by (type, zone, noun).
+    """Union damages across N independent passes; dedup by _dedup_key.
 
     Recall-first: every distinct finding is KEPT even if it appeared in only one
     pass (critical damage is often found nondeterministically in just 1/N). The
@@ -396,7 +607,7 @@ def _merge_passes(pass_results: list[list[dict]], n_passes: int) -> list[dict]:
     for damages in pass_results:
         seen_this_pass: set = set()
         for d in damages:
-            k = (d.get("damage_type"), d.get("zone"), _noun_key(d.get("description", "")))
+            k = _dedup_key(d)
             if k in seen_this_pass:
                 continue  # count a finding once per pass
             seen_this_pass.add(k)
@@ -409,6 +620,8 @@ def _merge_passes(pass_results: list[list[dict]], n_passes: int) -> list[dict]:
                 if _SEV_RANK.get(d.get("severity"), 0) > _SEV_RANK.get(cur.get("severity"), 0):
                     cur["severity"] = d.get("severity")
                     cur["description"] = d.get("description", cur.get("description"))
+                if d.get("needs_review"):
+                    cur["needs_review"] = True
 
     out: list = []
     for d in agg.values():
@@ -421,28 +634,60 @@ def _merge_passes(pass_results: list[list[dict]], n_passes: int) -> list[dict]:
     return out
 
 
-def _make_grid(im) -> list[tuple[str, object]]:
-    """Split the image into an overlapping grid (wide=3x2, tall=2x3), each tile
-    upscaled. Returns [(pixel_box_str, PIL_tile), ...]."""
+def _downscale(im, max_side: int):
+    """Return a copy of `im` whose longest side is <= max_side (no upscaling)."""
     from PIL import Image
-    W, H = im.size
+    w, h = im.size
+    longest = max(w, h)
+    if longest <= max_side:
+        return im
+    s = max_side / longest
+    return im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
+
+
+def _make_grid(insp, ref=None) -> list:
+    """Overlapping grid (wide=3x2, tall=2x3). For each cell return
+    (pixel_box_str, upscaled_inspection_tile, upscaled_reference_tile_or_None).
+    The reference is cropped by the SAME relative box (it may differ in size/pose,
+    so this is an approximate region match — enough for component-level diffing)."""
+    from PIL import Image
+    W, H = insp.size
     cols, rows = (3, 2) if W >= H else (2, 3)
     tw, th = W / cols, H / rows
+    rW, rH = (ref.size if ref is not None else (W, H))
+    sx, sy = (rW / W if W else 1.0), (rH / H if H else 1.0)
     tiles = []
     for r in range(rows):
         for c in range(cols):
             x0 = max(0, int(c * tw - _TILE_OVERLAP * tw)); y0 = max(0, int(r * th - _TILE_OVERLAP * th))
             x1 = min(W, int((c + 1) * tw + _TILE_OVERLAP * tw)); y1 = min(H, int((r + 1) * th + _TILE_OVERLAP * th))
-            t = im.crop((x0, y0, x1, y1))
-            t = t.resize((int(t.width * _TILE_UPSCALE), int(t.height * _TILE_UPSCALE)), Image.LANCZOS)
-            tiles.append((f"{x0},{y0},{x1},{y1}", t))
+            tw_px, th_px = max(1, int((x1 - x0) * _TILE_UPSCALE)), max(1, int((y1 - y0) * _TILE_UPSCALE))
+            t = insp.crop((x0, y0, x1, y1)).resize((tw_px, th_px), Image.LANCZOS)
+            rt = None
+            if ref is not None:
+                rx0, ry0 = int(x0 * sx), int(y0 * sy)
+                rx1, ry1 = min(rW, int(x1 * sx)), min(rH, int(y1 * sy))
+                if rx1 > rx0 and ry1 > ry0:
+                    rt = ref.crop((rx0, ry0, rx1, ry1)).resize((tw_px, th_px), Image.LANCZOS)
+            tiles.append((f"{x0},{y0},{x1},{y1}", t, rt))
     return tiles
 
 
-def _inspect_tile(client, model, ang_human, box_str, tile) -> list:
-    """Inspect one upscaled tile; return list of normalized damage dicts."""
-    content = [
-        {"type": "text", "text": _TILE_PROMPT.format(ang=ang_human)},
+def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64) -> list:
+    """Inspect one region with context + reference; return normalized damage dicts."""
+    content = [{"type": "text", "text": _TILE_PROMPT.format(ang=ang_human)}]
+    if context_b64:
+        content += [
+            {"type": "text", "text": "IMMAGINE A — CONTESTO (intero veicolo):"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{context_b64}"}},
+        ]
+    if ref_tile is not None:
+        content += [
+            {"type": "text", "text": "IMMAGINE B — RIFERIMENTO INTEGRO di questa regione:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_b64(ref_tile)}"}},
+        ]
+    content += [
+        {"type": "text", "text": "IMMAGINE C — REGIONE DA ISPEZIONARE (ingrandita):"},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_b64(tile)}"}},
     ]
     kwargs = _build_api_kwargs(model, content)
@@ -461,16 +706,33 @@ def _inspect_tile(client, model, ang_human, box_str, tile) -> list:
     return [{"box": box_str, **it} for it in items if isinstance(it, dict)]
 
 
-def _tiled_detail_pass(client, model, im_full, angle_label) -> list:
-    """Run the deterministic grid detail pass. Returns extra damage dicts.
-    Fari/fanali findings are flagged for manual review ([DA VERIFICARE], low confidence)."""
+def _is_background(text: str) -> bool:
+    return any(k in text for k in _BACKGROUND_KW)
+
+
+def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label) -> list:
+    """Deterministic reference-aware grid detail pass (run ONCE per photo).
+
+    Guardrails applied server-side (the prompt's IGNORA list is advisory only):
+      - drop findings whose component/description names a non-vehicle region;
+      - drop lone cosmetic graffio/ammaccatura 'lieve' (the main call already
+        catches surface cosmetics — tiles flooded the output with them);
+      - keep ALL structural findings (crepa/rottura/pezzo_mancante) at any severity;
+      - zone is inferred from the named component, not blindly from the angle;
+      - fari/fanali findings stay flagged needs_review ([DA VERIFICARE])."""
     from concurrent.futures import ThreadPoolExecutor
     ang_human = (angle_label or "").replace("_", " ")
-    zone = ZONE_BY_ANGLE.get(angle_label, "frontale")
-    tiles = _make_grid(im_full)
+    context_b64 = None
+    try:
+        context_b64 = _pil_to_b64(_downscale(insp_im, _CONTEXT_THUMB_MAX), quality=70)
+    except Exception as e:
+        logger.warning("context thumbnail failed: %s", e)
+    tiles = _make_grid(insp_im, ref_im)
     raw_items: list = []
     with ThreadPoolExecutor(max_workers=6) as ex:
-        for items in ex.map(lambda t: _safe_inspect_tile(client, model, ang_human, t[0], t[1]), tiles):
+        for items in ex.map(
+            lambda t: _safe_inspect_tile(client, model, ang_human, t[0], t[1], t[2], context_b64), tiles
+        ):
             raw_items.extend(items)
 
     out: list = []
@@ -482,23 +744,68 @@ def _tiled_detail_pass(client, model, im_full, angle_label) -> list:
             continue
         comp = str(it.get("componente") or "")
         desc = (it.get("description") or comp)[:160]
-        is_light = any(k in (comp + " " + desc).lower() for k in _LIGHT_KW)
-        if is_light:
+        blob = (comp + " " + desc).lower()
+        # Guardrail: non-vehicle region.
+        if _is_background(blob):
+            logger.info("Tile FP dropped (background): %s", desc)
+            continue
+        # Cosmetic floor: lone lieve scratch/dent from a tile is low-value noise.
+        if dt in ("graffio", "ammaccatura") and sev == "lieve":
+            continue
+        is_light = any(k in blob for k in _LIGHT_KW)
+        if is_light and not desc.startswith("[DA VERIFICARE]"):
             desc = "[DA VERIFICARE] " + desc
-        out.append({
-            "damage_type": dt, "severity": sev, "zone": zone, "description": desc,
+        d = {
+            "damage_type": dt, "severity": sev,
+            "zone": _zone_from_component(blob, angle_label),
+            "description": desc,
             "bounding_box": it.get("box"),
-            "confidence": 0.4 if is_light else 0.5,
+            "confidence": 0.5,
             "needs_review": is_light,
-        })
+        }
+        _apply_severity_floor(d)
+        out.append(d)
     return out
 
 
-def _safe_inspect_tile(client, model, ang_human, box_str, tile) -> list:
+def _safe_inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64) -> list:
     try:
-        return _inspect_tile(client, model, ang_human, box_str, tile)
+        return _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64)
     except Exception as e:
         logger.warning("tile inspect failed box=%s: %s", box_str, e)
+        return []
+
+
+def _run_tiled_for_photo(client, model, photo, vehicle_type) -> list:
+    """Load inspection + integro-reference images and run the tiled detail pass ONCE.
+
+    Gated on vehicle_type membership (not on a reference encoding succeeding), so a
+    corrupt reference JPEG degrades to reference-less tiling instead of silently
+    disabling the entire detail pass. Best-effort: returns [] on any failure.
+    """
+    if not REFERENCE_SUBDIR_BY_VEHICLE_TYPE.get(vehicle_type or ""):
+        return []
+    insp_im = _pil_from_source(photo.file_path, getattr(photo, "image_data", None))
+    if insp_im is None:
+        return []
+    ref_im = None
+    ref_path = _reference_image_path(vehicle_type, photo.angle_label)
+    if ref_path:
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(ref_path) as r:
+                ref_im = ImageOps.exif_transpose(r).convert("RGB")
+        except Exception as e:
+            logger.warning("Reference image open failed (%s) — tiling WITHOUT reference", e)
+    else:
+        logger.warning(
+            "No integro reference for vehicle_type=%s angle=%s — tiling without reference",
+            vehicle_type, photo.angle_label,
+        )
+    try:
+        return _tiled_detail_pass(client, model, insp_im, ref_im, photo.angle_label)
+    except Exception as e:
+        logger.warning("Tiled detail pass failed angle=%s: %s", photo.angle_label, e)
         return []
 
 
@@ -566,32 +873,26 @@ def _call_openai_single(client, model: str, photo: Photo, vehicle_type: str | No
         lines = [l for l in lines if not l.strip().startswith("```")]
         json_text = "\n".join(lines).strip()
 
+    top_obj = _parse_top_object(json_text)
     damages = _extract_damages(json_text)
-    validated = _validate_damages(damages)
+    validated = _validate_damages(damages, photo.angle_label)
+
+    # Checklist backstop: convert `mancante` component statuses the model declared
+    # (but did not duplicate into `damages`) into pezzo_mancante findings. This is
+    # the structural recall fix for missing parts — previously the checklist was
+    # emitted by the prompt and then discarded by every code path.
+    checklist_dmgs = _damages_from_checklist(top_obj, photo.angle_label)
+    if checklist_dmgs:
+        validated = _merge_damages(validated, checklist_dmgs)
+
     logger.info(
-        "Per-photo analysis angle=%s: %d damages validated out of %d returned",
-        photo.angle_label, len(validated), len(damages),
+        "Per-photo analysis angle=%s: %d damages validated out of %d returned (+%d from checklist)",
+        photo.angle_label, len(validated), len(damages), len(checklist_dmgs),
     )
 
-    # Stage 2 (scudo with reference): deterministic grid detail pass. Catches small
-    # damage (cracked light lens, broken/missing lower bumper) that is below the
-    # detection threshold at full-frame 720p. Fari findings are flagged DA VERIFICARE.
-    if ref_path and ref_b64:
-        im_full = _pil_from_source(photo.file_path, getattr(photo, "image_data", None))
-        if im_full is not None:
-            try:
-                extra = _tiled_detail_pass(client, model, im_full, photo.angle_label)
-            except Exception as e:
-                logger.warning("Stage-2 tiled pass failed angle=%s: %s", photo.angle_label, e)
-                extra = []
-            if extra:
-                before = len(validated)
-                validated = _merge_damages(validated, extra)
-                logger.info(
-                    "Stage-2 tiled angle=%s: +%d detail damages (%d unique after merge)",
-                    photo.angle_label, len(extra), len(validated) - before,
-                )
-
+    # The deterministic tiled detail pass is NOT run here: it is run ONCE per
+    # photo in _run_one (it is deterministic, so repeating it per VLM pass tripled
+    # tile cost for no recall gain).
     return validated, raw_text
 
 
@@ -648,7 +949,19 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
             )
 
         pass_damages = [dmg for dmg, _ in ok]
-        merged = _merge_passes(pass_damages, passes) if passes > 1 else pass_damages[0]
+        merged = _merge_passes(pass_damages, passes) if passes > 1 else list(pass_damages[0])
+
+        # Deterministic reference-aware tiled detail pass — run ONCE per photo
+        # (not once per VLM pass), then union into the multipass-merged findings.
+        tile_extra = await asyncio.to_thread(_run_tiled_for_photo, client, model, photo, vehicle_type)
+        if tile_extra:
+            before = len(merged)
+            merged = _merge_damages(merged, tile_extra)
+            logger.info(
+                "angle=%s tiled: +%d detail damages (%d unique after merge)",
+                photo.angle_label, len(tile_extra), len(merged) - before,
+            )
+
         raw = f"[multipass {len(ok)}/{passes}]\n" + (ok[0][1] or "")
         logger.info(
             "angle=%s multipass: %d unique damages from %d/%d passes",
@@ -749,8 +1062,12 @@ async def analyze_session(session_id: str) -> None:
             # Call OpenAI once per photo (concurrently)
             damage_list, raw_model_text = await _call_openai(photos, vehicle_type)
 
-            # Save damages
+            # Save damages. Use .get for the required fields and skip malformed
+            # entries so one bad merge/tile dict can't 500 the whole session.
             for damage_data in damage_list:
+                if not (damage_data.get("damage_type") and damage_data.get("severity") and damage_data.get("zone")):
+                    logger.warning("Skipping malformed damage at persist: %s", damage_data)
+                    continue
                 damage = Damage(
                     id=str(uuid.uuid4()),
                     analysis_id=analysis_id,
@@ -760,6 +1077,7 @@ async def analyze_session(session_id: str) -> None:
                     description=damage_data.get("description"),
                     bounding_box=damage_data.get("bounding_box"),
                     confidence=damage_data.get("confidence"),
+                    needs_review=1 if damage_data.get("needs_review") else 0,
                 )
                 db_session.add(damage)
 

@@ -4,9 +4,19 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/db.sqlite3"
     api_key: str = ""  # empty = no auth check (local dev)
+    # When True, an empty api_key is a hard misconfiguration flagged loudly at
+    # boot instead of silently shipping an open instance. Defaults False so local
+    # dev keeps working; set REQUIRE_AUTH=true in production.
+    require_auth: bool = False
+    # Gate diagnostic endpoints (e.g. debug-photos, which leaks server paths).
+    debug_endpoints: bool = False
     openai_api_key: str = ""
     openai_base_url: str = ""
-    openai_model: str = "o4-mini"
+    # Validated prod model = google/gemini-2.5-flash via OpenRouter. The old
+    # default "o4-mini" was a footgun: unavailable on the OpenRouter base_url AND
+    # _is_reasoning_model() => True, which silently drops temperature and switches
+    # to max_completion_tokens. Keep a sane Gemini default if the env is unset.
+    openai_model: str = "google/gemini-2.5-flash"
     # Independent VLM passes per photo, merged by union (recall-first) with
     # agreement -> confidence. 1 = single pass (legacy). 3 = recommended for
     # critical-damage recall. Cost/latency scale ~linearly with this.

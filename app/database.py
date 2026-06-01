@@ -57,6 +57,20 @@ async def create_tables():
             await conn.execute(text(
                 "ALTER TABLE photos ADD COLUMN IF NOT EXISTS image_data BYTEA"
             ))
+            await conn.execute(text(
+                "ALTER TABLE damages ADD COLUMN IF NOT EXISTS needs_review INTEGER DEFAULT 0"
+            ))
+    else:
+        # SQLite has no ADD COLUMN IF NOT EXISTS; add only when absent so an
+        # existing prod DB gains the new column without a wipe.
+        async with engine.begin() as conn:
+            from sqlalchemy import text
+            cols = await conn.execute(text("PRAGMA table_info(damages)"))
+            names = {row[1] for row in cols.fetchall()}
+            if names and "needs_review" not in names:
+                await conn.execute(text(
+                    "ALTER TABLE damages ADD COLUMN needs_review INTEGER DEFAULT 0"
+                ))
 
 
 async def get_db():

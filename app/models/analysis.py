@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Float
+from sqlalchemy import Column, String, ForeignKey, Float, Integer
 
 from app.database import Base
 
@@ -24,3 +24,8 @@ class Damage(Base):
     description = Column(String, nullable=True)
     bounding_box = Column(String, nullable=True)
     confidence = Column(Float, nullable=True)  # 0.0-1.0 (votes/passes or YOLO prob)
+    # 1 = surface as an amber "da verificare" triage state (resolution-sensitive
+    # findings like a possibly-cracked light lens, or a checklist-derived missing
+    # part). Previously this signal lived only in the description text + a low
+    # confidence and was lost at persistence.
+    needs_review = Column(Integer, nullable=False, default=0)

@@ -9,6 +9,7 @@ import shutil
 
 from sqlalchemy import select, delete
 
+from app.config import settings
 from app.database import async_session
 from app.models.analysis import AnalysisResult, Damage
 from app.models.session import Session
@@ -22,6 +23,8 @@ from app.utils.response import success_response
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "sessions")
+
+CANONICAL_ANGLES = ("retro", "lato_destro", "fronte", "lato_sinistro")
 
 
 @router.post("", status_code=201)
@@ -83,7 +86,16 @@ async def upload_photo(
         filename = f"{photo_id}.jpg"
         file_path = os.path.join(session_dir, filename)
 
+        # Reject non-image uploads (lenient when content_type is absent).
+        if file.content_type and not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="Tipo file non supportato")
+
         content = await file.read()
+
+        # Reject oversized uploads before touching disk/DB.
+        if len(content) > settings.max_photo_size_bytes:
+            raise HTTPException(status_code=413, detail="Foto troppo grande")
+
         try:
             with open(file_path, "wb") as f:
                 f.write(content)
@@ -243,6 +255,8 @@ async def get_session_details(session_id: str):
                     "zone": d.zone,
                     "description": d.description,
                     "bounding_box": d.bounding_box,
+                    "confidence": d.confidence,
+                    "needs_review": bool(getattr(d, "needs_review", 0)),
                 }
                 for d in damages
             ]
@@ -308,6 +322,8 @@ async def get_session_results(session_id: str):
                     "zone": d.zone,
                     "description": d.description,
                     "bounding_box": d.bounding_box,
+                    "confidence": d.confidence,
+                    "needs_review": bool(getattr(d, "needs_review", 0)),
                 }
                 for d in damages
             ]
@@ -353,6 +369,8 @@ async def get_photo_file(session_id: str, photo_id: str):
 
 @router.get("/{session_id}/debug-photos")
 async def debug_photos(session_id: str):
+    if not settings.debug_endpoints:
+        raise HTTPException(status_code=404, detail="Not found")
     async with async_session() as db_session:
         sess = await db_session.get(Session, session_id)
         if not sess:
@@ -382,6 +400,10 @@ async def debug_photos(session_id: str):
 
 @router.post("/{session_id}/reanalyze")
 async def reanalyze_session(session_id: str, files: list[UploadFile] = File(default=[])):
+    # Cap the number of files (normal session has 4; 8 is a safe upper bound).
+    if len(files) > 8:
+        raise HTTPException(status_code=413, detail="Troppe foto")
+
     async with async_session() as db_session:
         sess = await db_session.get(Session, session_id)
         if not sess:
@@ -413,14 +435,24 @@ async def reanalyze_session(session_id: str, files: list[UploadFile] = File(defa
                 file_path = os.path.join(session_dir, filename)
 
                 content = await file.read()
+
+                # Enforce the same size limit as the single-photo upload.
+                if len(content) > settings.max_photo_size_bytes:
+                    raise HTTPException(status_code=413, detail="Foto troppo grande")
+
                 try:
                     with open(file_path, "wb") as f:
                         f.write(content)
                 except OSError:
                     pass
 
-                # Extract angle info from filename (phone sends angle_label as filename)
+                # Extract angle info from filename (phone sends angle_label as filename).
+                # A non-canonical filename would silently disable the per-angle
+                # prompt / reference / tiled pass downstream, so fall back to the
+                # canonical angle for this index.
                 angle_label = file.filename.rsplit('.', 1)[0] if file.filename else f"angle_{i}"
+                if angle_label not in CANONICAL_ANGLES:
+                    angle_label = CANONICAL_ANGLES[i] if i < 4 else f"angle_{i}"
 
                 photo = Photo(
                     id=photo_id,

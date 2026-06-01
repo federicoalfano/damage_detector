@@ -80,6 +80,12 @@ Stesse regole rigide. Nel dubbio NON segnalare.
 "graffio" | "ammaccatura" | "crepa" | "rottura" | "pezzo_mancante" | "usura" (solo grave) | "sporcizia" (solo grave)
 
 Severity: "lieve" | "moderato" | "grave"
+REGOLA SEVERITY (obbligatoria): un componente FUNZIONALE rotto o MANCANTE non e mai "lieve".
+- pezzo_mancante o rottura di faro/fanale/specchietto/vetro/parabrezza/lunotto/ruota/targa => "grave".
+- pezzo_mancante o rottura di paraurti/portellone/portiera/maniglia/cofano => almeno "moderato".
+- solo graffio o ammaccatura superficiale puo essere "lieve".
+PRIORITA: i PEZZI MANCANTI sono la cosa piu importante da rilevare. Nella checklist marca "mancante"
+ogni componente presente nel RIFERIMENTO ma assente o frammentato nella foto da ispezionare.
 Zone: per questa foto del lato sinistro usa SEMPRE "zone": "laterale_sinistro".
 
 === FORMATO RISPOSTA (SOLO un oggetto JSON, niente markdown, niente testo prima/dopo) ===

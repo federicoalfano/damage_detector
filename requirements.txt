@@ -7,3 +7,7 @@ asyncpg>=0.29.0
 pydantic-settings>=2.0
 bcrypt>=4.0
 uvicorn[standard]
+# Pillow is load-bearing: ai_service applies EXIF orientation + JPEG re-encode
+# before every VLM call and builds the tiled detail-pass crops. Without it the
+# pipeline silently sends raw (often sideways) bytes and recall collapses.
+Pillow>=10

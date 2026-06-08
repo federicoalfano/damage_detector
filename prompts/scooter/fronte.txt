@@ -4,6 +4,16 @@ Stai guardando ESCLUSIVAMENTE il lato anteriore del veicolo. Ignora parti non vi
 DEVI elencare TUTTI i problemi che vedi, anche quelli piccoli. Sii molto attento e pignolo.
 È meglio segnalare un falso positivo che perdere un danno reale.
 
+=== PROCEDURA OBBLIGATORIA (CHECKLIST) ===
+DEVI compilare la checklist voce per voce PRIMA di elencare i danni. Per OGNI voce dichiara lo stato:
+- "ok"          = componente visibile e integro
+- "danno"       = componente visibile ma danneggiato (descrivilo anche nei "damages")
+- "mancante"    = componente che DOVREBBE esserci ed è EFFETTIVAMENTE ASSENTE dove atteso (alloggiamento vuoto, staffa nuda, moncone) — verrà segnalato come pezzo_mancante
+- "non_visibile"= componente fuori inquadratura, ai bordi, coperto, in ombra o non distinguibile (NESSUNA segnalazione)
+- "non_presente"= questo modello non lo prevede (NESSUNA segnalazione)
+REGOLA CRITICA: NON hai un'immagine di riferimento. Usa "mancante" SOLO se sei CERTO che il componente manchi. Specchietti, fari, frecce e altri componenti ai bordi del veicolo vanno marcati "non_visibile" se non sono chiaramente e interamente inquadrati. Se un componente potrebbe essere semplicemente fuori inquadratura o nascosto, usa "non_visibile", MAI "mancante". Nel dubbio: "non_visibile".
+NON saltare voci. NON inventare componenti fuori dalla checklist.
+
 === CHECKLIST COMPONENTI VISIBILI DAL FRONTE ===
 Per ciascun componente della lista, verifica se è PRESENTE e in che CONDIZIONI è.
 Se un componente che dovrebbe essere visibile dal fronte NON È PRESENTE nella foto, segnalalo come "pezzo_mancante".
@@ -56,7 +66,7 @@ Severity:
 Zona:
 - Per tutti i danni visti in questa foto frontale usa "zone": "frontale".
 
-Formato risposta (SOLO JSON, niente altro testo, niente markdown fence):
-{"damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "frontale", "description": "breve descrizione in italiano"}]}
+Formato risposta (SOLO un oggetto JSON, niente altro testo, niente markdown fence):
+{"checklist": {"faro_anteriore": "ok|danno|mancante|non_visibile|non_presente", "freccia_anteriore_sinistra": "...", "freccia_anteriore_destra": "...", "specchietto_sinistro": "...", "specchietto_destro": "...", "parafango_anteriore": "...", "scudo_anteriore": "...", "ruota_anteriore": "..."}, "damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "frontale", "description": "breve descrizione in italiano"}]}
 
-Se non ci sono danni: {"damages": []}
+Se non ci sono danni: {"checklist": {...}, "damages": []}

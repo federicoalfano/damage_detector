@@ -201,9 +201,18 @@ async def list_sessions():
             for d in damages:
                 dmg_by_analysis[d.analysis_id].append(d)
 
+        # Bulk-load vehicles so the list can show the real model/plate and pick a
+        # type-correct icon instead of a truncated UUID (one query, no per-row N+1).
+        vehicles = (await db_session.execute(select(Vehicle))).scalars().all()
+        vehicle_by_id = {v.id: v for v in vehicles}
+
         data = []
         for s in sessions:
             session_data = SessionResponse.model_validate(s).model_dump()
+            vehicle = vehicle_by_id.get(s.vehicle_id)
+            session_data["vehicle_type"] = vehicle.type if vehicle else None
+            session_data["vehicle_model"] = vehicle.model if vehicle else None
+            session_data["vehicle_plate"] = vehicle.plate if vehicle else None
             analysis = analysis_by_session.get(s.id)
 
             damage_types: list[str] = []

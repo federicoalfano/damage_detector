@@ -268,8 +268,14 @@ def _is_reasoning_model(model: str) -> bool:
     return name.startswith(_REASONING_PREFIXES)
 
 
-def _build_api_kwargs(model: str, content: list[dict]) -> dict:
-    """Build OpenAI API kwargs based on model type."""
+def _build_api_kwargs(model: str, content: list[dict], pass_index: int = 0) -> dict:
+    """Build OpenAI API kwargs based on model type.
+
+    `pass_index` decorrelates the independent main passes (recall-first union):
+    pass 0 runs at temperature 0.2 (stable baseline); passes >=1 run hotter so the
+    union surfaces findings a single deterministic read would miss. Reasoning
+    models take no temperature, so the schedule only applies to the else branch.
+    """
     api_kwargs: dict = {
         "model": model,
         "messages": [{"role": "user", "content": content}],
@@ -279,9 +285,29 @@ def _build_api_kwargs(model: str, content: list[dict]) -> dict:
         api_kwargs["max_completion_tokens"] = 8192
     else:
         api_kwargs["max_tokens"] = 8192
-        api_kwargs["temperature"] = 0.2
+        api_kwargs["temperature"] = _PASS0_TEMP if pass_index <= 0 else _PASSN_TEMP
 
     return api_kwargs
+
+
+# Per-pass temperature schedule for the recall-first union (see _build_api_kwargs).
+_PASS0_TEMP = 0.2  # stable deterministic baseline read
+_PASSN_TEMP = 0.5  # hotter on passes >=1 to decorrelate the union
+
+
+# Appended to the prompt on passes >=1 so a second/third read of the SAME photo
+# looks where a single pass loses recall: functional/safety components (broken or
+# MISSING) and the low-contrast lower body. It must NOT make the model more
+# trigger-happy — only re-direct attention — to keep precision flat.
+_FOCUS_SUFFIX = (
+    "\n\n=== SECONDA LETTURA (stessa foto) ===\n"
+    "Ricontrolla con occhio fresco le zone che si perdono facilmente: i componenti "
+    "funzionali/di sicurezza (fari, fanali, frecce, specchietti, vetri, ruote, targa, "
+    "paraurti) per capire se sono rotti o MANCANTI, e la fascia bassa del veicolo "
+    "(paraurti inferiore, modanature, passaruota, plastiche scure) dove i danni sono "
+    "poco contrastati. NON essere più aggressivo: segnala SOLO danni reali e, nel "
+    "dubbio, NON segnalare. Mantieni esattamente lo stesso formato JSON di risposta."
+)
 
 
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -809,16 +835,22 @@ def _run_tiled_for_photo(client, model, photo, vehicle_type) -> list:
         return []
 
 
-def _call_openai_single(client, model: str, photo: Photo, vehicle_type: str | None) -> tuple[list, str]:
+def _call_openai_single(
+    client, model: str, photo: Photo, vehicle_type: str | None, pass_index: int = 0
+) -> tuple[list, str]:
     """Synchronous: run ONE OpenAI call for ONE photo. Returns (validated_damages, raw_text).
 
-    Raises on transport/API failures; callers should catch and log per-photo.
+    `pass_index` selects the per-pass decorrelation (temperature + focus suffix)
+    used by the recall-first multipass union. Raises on transport/API failures;
+    callers should catch and log per-photo.
     """
     b64 = _encode_image_base64(photo.file_path, getattr(photo, "image_data", None))
     if b64 is None:
         return [], ""
 
     prompt = _load_prompt(vehicle_type, photo.angle_label)
+    if pass_index >= 1:
+        prompt = prompt + _FOCUS_SUFFIX
     label = ANGLE_LABELS.get(photo.angle_label, photo.angle_label)
 
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -842,14 +874,14 @@ def _call_openai_single(client, model: str, photo: Photo, vehicle_type: str | No
 
     content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
 
-    api_kwargs = _build_api_kwargs(model, content)
+    api_kwargs = _build_api_kwargs(model, content, pass_index)
     logger.info(
-        "OpenAI request (per-photo): model=%s, angle=%s, vehicle_type=%s",
-        model, photo.angle_label, vehicle_type,
+        "OpenAI request (per-photo): model=%s, angle=%s, vehicle_type=%s, pass=%d",
+        model, photo.angle_label, vehicle_type, pass_index,
     )
 
     response = _chat_with_retry(client, **api_kwargs)
-    _log_usage(response, model, f"main:{photo.angle_label}")
+    _log_usage(response, model, f"main:{photo.angle_label}:p{pass_index}")
 
     if not response.choices:
         logger.error(
@@ -927,8 +959,8 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
         EVERY pass failed — a partial failure still yields the surviving passes."""
         outcomes = await asyncio.gather(
             *(
-                asyncio.to_thread(_call_openai_single, client, model, photo, vehicle_type)
-                for _ in range(passes)
+                asyncio.to_thread(_call_openai_single, client, model, photo, vehicle_type, i)
+                for i in range(passes)
             ),
             return_exceptions=True,
         )

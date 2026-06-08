@@ -239,6 +239,92 @@ async def test_call_openai_survives_single_photo_failure(monkeypatch):
         assert "=== retro ===" in raw
 
 
+def test_build_api_kwargs_pass_temperature_schedule():
+    """Pass 0 is the stable 0.2 baseline; passes >=1 run hotter to decorrelate.
+    Reasoning models never receive a temperature, whatever the pass index."""
+    content = [{"type": "text", "text": "x"}]
+    assert ai_service._build_api_kwargs("google/gemini-2.5-flash", content, 0)["temperature"] == 0.2
+    assert ai_service._build_api_kwargs("google/gemini-2.5-flash", content, 1)["temperature"] == 0.5
+    assert ai_service._build_api_kwargs("google/gemini-2.5-flash", content, 2)["temperature"] == 0.5
+    kr = ai_service._build_api_kwargs("openai/o4-mini", content, 1)
+    assert "temperature" not in kr
+    assert kr["max_completion_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_scooter_checklist_backstop(monkeypatch):
+    """Scooter checklist: a 'mancante' component becomes a pezzo_mancante flagged
+    needs_review; 'non_visibile' (off-frame) is NOT a finding. This is the
+    structural missing-part recall path, now enabled for scooters too."""
+    monkeypatch.setattr(ai_service.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(ai_service.settings, "openai_base_url", "")
+    monkeypatch.setattr(ai_service.settings, "openai_model", "gpt-4o-mini")
+    monkeypatch.setattr(ai_service.settings, "vlm_passes", 1)
+
+    payload = (
+        '{"checklist": {"faro_anteriore": "ok", "specchietto_sinistro": "mancante", '
+        '"specchietto_destro": "non_visibile", "ruota_anteriore": "ok"}, "damages": []}'
+    )
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return _fake_openai_response(payload)
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = FakeChat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        photos = [_make_fake_photo(tmpdir, "fronte", 0)]
+        with patch("openai.OpenAI", FakeClient):
+            damages, _ = await _call_openai(photos, vehicle_type="piaggio")
+
+    assert len(damages) == 1  # only the 'mancante'; non_visibile dropped
+    d = damages[0]
+    assert d["damage_type"] == "pezzo_mancante"
+    assert d["zone"] == "frontale"
+    assert d["needs_review"] is True
+    assert d["severity"] == "grave"  # specchietto = safety component
+    assert "specchietto sinistro" in (d["description"] or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_focus_suffix_applied_on_later_passes(monkeypatch):
+    """Pass 0 sends the bare prompt at temp 0.2; pass >=1 appends the focus
+    suffix at temp 0.5 — decorrelating the union without adding any call."""
+    monkeypatch.setattr(ai_service.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(ai_service.settings, "openai_base_url", "")
+    monkeypatch.setattr(ai_service.settings, "openai_model", "gpt-4o-mini")
+    monkeypatch.setattr(ai_service.settings, "vlm_passes", 2)
+
+    seen: list[tuple[bool, float]] = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            text = kwargs["messages"][0]["content"][0]["text"]
+            seen.append(("SECONDA LETTURA" in text, kwargs.get("temperature")))
+            return _fake_openai_response('{"damages": []}')
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = FakeChat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        photos = [_make_fake_photo(tmpdir, "fronte", 0)]
+        with patch("openai.OpenAI", FakeClient):
+            await _call_openai(photos, vehicle_type="piaggio")
+
+    assert len(seen) == 2
+    assert (False, 0.2) in seen  # baseline pass
+    assert (True, 0.5) in seen   # focus pass
+
+
 @pytest.mark.asyncio
 async def test_analyze_session_no_photos():
     """Analysis with no photos returns empty damages."""

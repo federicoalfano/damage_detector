@@ -325,6 +325,54 @@ async def test_focus_suffix_applied_on_later_passes(monkeypatch):
     assert (True, 0.5) in seen   # focus pass
 
 
+def test_tile_passes_union(monkeypatch):
+    """The scudo tile pass runs settings.tile_passes times and UNIONS findings,
+    so a critical found in only one nondeterministic run is still kept."""
+    monkeypatch.setattr(ai_service.settings, "tile_passes", 2)
+    # Bypass real image decode + reference lookup; we only test the union loop.
+    monkeypatch.setattr(ai_service, "_pil_from_source", lambda *a, **k: object())
+    monkeypatch.setattr(ai_service, "_reference_image_path", lambda *a, **k: None)
+
+    runs = [
+        [{"damage_type": "graffio", "severity": "lieve", "zone": "frontale",
+          "description": "graffio cofano"}],
+        [{"damage_type": "graffio", "severity": "lieve", "zone": "frontale",
+          "description": "graffio cofano"},
+         {"damage_type": "crepa", "severity": "grave", "zone": "frontale",
+          "description": "faro anteriore destro crepa"}],
+    ]
+    calls = {"n": 0}
+
+    def fake_pass(client, model, insp, ref, angle, pass_index=0):
+        i = calls["n"]
+        calls["n"] += 1
+        return [dict(d) for d in runs[i % len(runs)]]
+
+    monkeypatch.setattr(ai_service, "_tiled_detail_pass", fake_pass)
+
+    photo = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="fronte")
+    out = ai_service._run_tiled_for_photo(None, "m", photo, "scudo")
+
+    assert calls["n"] == 2  # tile pass ran twice
+    descs = {d["description"] for d in out}
+    # the crepa seen only in the 2nd run survives the union (recall-first)
+    assert "faro anteriore destro crepa" in descs
+    assert "graffio cofano" in descs
+    assert len(out) == 2  # deduped to the 2 unique findings
+
+
+def test_tiling_skipped_for_non_reference_vehicle(monkeypatch):
+    """tile_passes only affects scudo: scooters never enter the tile loop."""
+    monkeypatch.setattr(ai_service.settings, "tile_passes", 3)
+    called = {"n": 0}
+    monkeypatch.setattr(ai_service, "_tiled_detail_pass",
+                        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or [])
+    photo = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="fronte")
+    out = ai_service._run_tiled_for_photo(None, "m", photo, "piaggio")
+    assert out == []
+    assert called["n"] == 0  # never tiled a scooter
+
+
 @pytest.mark.asyncio
 async def test_analyze_session_no_photos():
     """Analysis with no photos returns empty damages."""

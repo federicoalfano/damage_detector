@@ -699,8 +699,12 @@ def _make_grid(insp, ref=None) -> list:
     return tiles
 
 
-def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64) -> list:
-    """Inspect one region with context + reference; return normalized damage dicts."""
+def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index=0) -> list:
+    """Inspect one region with context + reference; return normalized damage dicts.
+
+    `pass_index` carries the tile-run temperature schedule (run 0 cool, run >=1
+    hotter) so repeated tile runs decorrelate and the union finds complementary
+    damage instead of the same finding twice."""
     content = [{"type": "text", "text": _TILE_PROMPT.format(ang=ang_human)}]
     if context_b64:
         content += [
@@ -716,7 +720,7 @@ def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64
         {"type": "text", "text": "IMMAGINE C — REGIONE DA ISPEZIONARE (ingrandita):"},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_b64(tile)}"}},
     ]
-    kwargs = _build_api_kwargs(model, content)
+    kwargs = _build_api_kwargs(model, content, pass_index)
     if _is_reasoning_model(model):
         kwargs["max_completion_tokens"] = 700
     else:
@@ -736,13 +740,14 @@ def _is_background(text: str) -> bool:
     return any(k in text for k in _BACKGROUND_KW)
 
 
-def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label) -> list:
-    """Deterministic reference-aware grid detail pass (run ONCE per photo).
+def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label, pass_index=0) -> list:
+    """Reference-aware grid detail pass over one photo (run TILE_PASSES times).
 
     Guardrails applied server-side (the prompt's IGNORA list is advisory only):
-      - drop findings whose component/description names a non-vehicle region;
-      - drop lone cosmetic graffio/ammaccatura 'lieve' (the main call already
-        catches surface cosmetics — tiles flooded the output with them);
+      - drop findings whose component/description names a non-vehicle region
+        (the only true-FP drop — everything else is kept for recall);
+      - lone cosmetic graffio/ammaccatura 'lieve' is KEPT but flagged
+        needs_review at low confidence (recall-first; was dropped before);
       - keep ALL structural findings (crepa/rottura/pezzo_mancante) at any severity;
       - zone is inferred from the named component, not blindly from the angle;
       - fari/fanali findings stay flagged needs_review ([DA VERIFICARE])."""
@@ -757,7 +762,7 @@ def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label) -> list:
     raw_items: list = []
     with ThreadPoolExecutor(max_workers=6) as ex:
         for items in ex.map(
-            lambda t: _safe_inspect_tile(client, model, ang_human, t[0], t[1], t[2], context_b64), tiles
+            lambda t: _safe_inspect_tile(client, model, ang_human, t[0], t[1], t[2], context_b64, pass_index), tiles
         ):
             raw_items.extend(items)
 
@@ -771,14 +776,18 @@ def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label) -> list:
         comp = str(it.get("componente") or "")
         desc = (it.get("description") or comp)[:160]
         blob = (comp + " " + desc).lower()
-        # Guardrail: non-vehicle region.
+        # Guardrail: non-vehicle region. This is the ONE thing we still drop —
+        # it is a true false positive (asphalt/sky/other vehicle), not a miss.
         if _is_background(blob):
             logger.info("Tile FP dropped (background): %s", desc)
             continue
-        # Cosmetic floor: lone lieve scratch/dent from a tile is low-value noise.
-        if dt in ("graffio", "ammaccatura") and sev == "lieve":
-            continue
+        # Recall-first (scudo "rileva tutto"): a lone lieve scratch/dent from a
+        # tile used to be DROPPED as noise. We now KEEP it but flag it
+        # needs_review at low confidence, so it surfaces as "da verificare" and is
+        # triaged by the inspector instead of being silently lost.
+        cosmetic_minor = dt in ("graffio", "ammaccatura") and sev == "lieve"
         is_light = any(k in blob for k in _LIGHT_KW)
+        needs_review = is_light or cosmetic_minor
         if is_light and not desc.startswith("[DA VERIFICARE]"):
             desc = "[DA VERIFICARE] " + desc
         d = {
@@ -786,17 +795,17 @@ def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label) -> list:
             "zone": _zone_from_component(blob, angle_label),
             "description": desc,
             "bounding_box": it.get("box"),
-            "confidence": 0.5,
-            "needs_review": is_light,
+            "confidence": 0.4 if cosmetic_minor else 0.5,
+            "needs_review": needs_review,
         }
         _apply_severity_floor(d)
         out.append(d)
     return out
 
 
-def _safe_inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64) -> list:
+def _safe_inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index=0) -> list:
     try:
-        return _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64)
+        return _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index)
     except Exception as e:
         logger.warning("tile inspect failed box=%s: %s", box_str, e)
         return []
@@ -828,11 +837,32 @@ def _run_tiled_for_photo(client, model, photo, vehicle_type) -> list:
             "No integro reference for vehicle_type=%s angle=%s — tiling without reference",
             vehicle_type, photo.angle_label,
         )
-    try:
-        return _tiled_detail_pass(client, model, insp_im, ref_im, photo.angle_label)
-    except Exception as e:
-        logger.warning("Tiled detail pass failed angle=%s: %s", photo.angle_label, e)
-        return []
+    # Run the (nondeterministic) tile pass N times and UNION the results. One run
+    # randomly misses real criticals (same photo gave 4/10/31 across runs), so the
+    # union is the highest-leverage recall lever for scudo. Each run is independent;
+    # a failed run contributes nothing instead of aborting the rest.
+    n = max(1, settings.tile_passes)
+    merged: list = []
+    runs_ok = 0
+    for run in range(n):
+        try:
+            found = _tiled_detail_pass(client, model, insp_im, ref_im, photo.angle_label, run)
+            runs_ok += 1
+        except Exception as e:
+            logger.warning("Tiled detail run %d/%d failed angle=%s: %s", run + 1, n, photo.angle_label, e)
+            continue
+        before = len(merged)
+        merged = _merge_damages(merged, found)
+        logger.info(
+            "Tiled run %d/%d angle=%s: %d found, +%d new (%d total)",
+            run + 1, n, photo.angle_label, len(found), len(merged) - before, len(merged),
+        )
+    if n > 1:
+        logger.info(
+            "Tiled union angle=%s: %d unique damages across %d/%d runs",
+            photo.angle_label, len(merged), runs_ok, n,
+        )
+    return merged
 
 
 def _call_openai_single(

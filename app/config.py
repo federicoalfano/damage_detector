@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     # agreement -> confidence. 1 = single pass (legacy). 3 = recommended for
     # critical-damage recall. Cost/latency scale ~linearly with this.
     vlm_passes: int = 3
+    # Independent runs of the scudo tiled detail pass, merged union-wise. The
+    # tile pass is the ENTIRE source of critical-damage recall and is highly
+    # nondeterministic (same photo: 4/10/31 criticals across runs), so a single
+    # run randomly misses real damage. 2 = recommended to recover those misses.
+    # Only affects scudo (tiling is gated on the reference-image vehicle types).
+    tile_passes: int = 2
     data_dir: str = "./data"
     max_photo_size_bytes: int = 2 * 1024 * 1024  # 2MB
     cors_origins: list[str] = ["http://localhost:8000", "http://192.168.1.200:8000"]

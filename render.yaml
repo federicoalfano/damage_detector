@@ -26,6 +26,8 @@ services:
         value: "google/gemini-2.5-flash"
       - key: VLM_PASSES
         value: "2"
+      - key: TILE_PASSES
+        value: "2"
       - key: API_KEY
         sync: false
       - key: CORS_ORIGINS

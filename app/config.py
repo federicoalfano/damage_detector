@@ -18,13 +18,17 @@ class Settings(BaseSettings):
     # to max_completion_tokens. Keep a sane Gemini default if the env is unset.
     openai_model: str = "google/gemini-2.5-flash"
     # Independent VLM passes per photo, merged by union (recall-first) with
-    # agreement -> confidence. 1 = single pass (legacy). 3 = recommended for
-    # critical-damage recall. Cost/latency scale ~linearly with this.
-    vlm_passes: int = 3
+    # agreement -> confidence. 1 = single pass (legacy). 2 = validated prod
+    # value (matches .env; a higher default silently inflated cost on deploys
+    # without the env var). Cost/latency scale ~linearly with this.
+    vlm_passes: int = 2
     # Independent runs of the scudo tiled detail pass, merged union-wise. The
     # tile pass is the ENTIRE source of critical-damage recall and is highly
     # nondeterministic (same photo: 4/10/31 criticals across runs), so a single
-    # run randomly misses real damage. 2 = recommended to recover those misses.
+    # run randomly misses real damage. 2 = validated prod value. A 3rd run adds
+    # ~+32% session cost (measured 2026-06-10: $0.030 -> $0.040 — image tokens
+    # bill flat, so call count IS the cost) for a modest recall bump; bump to 3
+    # only if the budget ceiling rises.
     # Only affects scudo (tiling is gated on the reference-image vehicle types).
     tile_passes: int = 2
     data_dir: str = "./data"

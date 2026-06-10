@@ -47,6 +47,11 @@ REFERENCE_SUBDIR_BY_VEHICLE_TYPE = {
     "scudo": "scudo",
 }
 
+# Longest side sent on the MAIN per-photo call (inspection photo + integro
+# reference). Today's app uploads 720p so this is a no-op; it is a guard so a
+# future higher-res capture path can't silently multiply main-pass image tokens.
+_MAIN_IMAGE_MAX_SIDE = 1536
+
 # Map vehicle type -> subdirectory under prompts/ holding per-angle files.
 PROMPT_SUBDIR_BY_VEHICLE_TYPE = {
     "piaggio": "scooter",
@@ -131,13 +136,15 @@ def _encode_image_base64(file_path: str, fallback_bytes: bytes | None = None) ->
 
     # OpenAI/OpenRouter ignores EXIF orientation. Phone cameras store images
     # rotated with an orientation tag — physically transpose so the model
-    # sees them upright.
+    # sees them upright. Also cap resolution: the main pass only needs
+    # context-level detail (the tile pass covers fine detail at zoom), so
+    # anything beyond _MAIN_IMAGE_MAX_SIDE just buys extra Gemini crops.
     try:
         from io import BytesIO
         from PIL import Image, ImageOps
         with Image.open(BytesIO(raw)) as im:
             ori = im.getexif().get(274)
-            transposed = ImageOps.exif_transpose(im)
+            transposed = _downscale(ImageOps.exif_transpose(im), _MAIN_IMAGE_MAX_SIDE)
             buf = BytesIO()
             transposed.convert("RGB").save(buf, format="JPEG", quality=90)
             data = buf.getvalue()
@@ -554,6 +561,10 @@ _TILE_PROMPT = (
     "Se nulla: {{\"damages\":[]}}."
 )
 _TILE_OVERLAP = 0.20
+# 2x upscale is COST-FREE on OpenRouter/gemini-2.5-flash: images are billed
+# ~flat (~258 tok each, measured 2026-06-10 — tile calls cost ~1184 tok input
+# at both 768px and 1194px tiles), and the A/B on a real dented van showed the
+# 768px variant downgrading a clearly 'moderato' dent to 'lieve'. Keep 2x.
 _TILE_UPSCALE = 2.0
 _CONTEXT_THUMB_MAX = 512  # longest side of the whole-frame context thumbnail
 

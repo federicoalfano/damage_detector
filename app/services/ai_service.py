@@ -1055,6 +1055,16 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
         raw_parts.append(f"{header}\n{raw}" if raw else f"{header}\n[EMPTY_RESPONSE]")
 
     combined_raw = "\n\n".join(raw_parts)
+
+    # If EVERY photo failed (e.g. revoked API key -> 401 on all calls) this is
+    # an infrastructure failure, not a clean vehicle: raise so analyze_session
+    # stores status="error" and the app shows the failure + retry instead of a
+    # false "nessun danno rilevato".
+    if photos and all(error for _, _, _, error in results):
+        raise RuntimeError(
+            f"all {len(photos)} photo analyses failed:\n{combined_raw}"
+        )
+
     logger.info(
         "AI analysis aggregated: %d damages across %d photo-calls",
         len(aggregated_damages), len(photos),

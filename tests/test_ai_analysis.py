@@ -239,6 +239,37 @@ async def test_call_openai_survives_single_photo_failure(monkeypatch):
         assert "=== retro ===" in raw
 
 
+@pytest.mark.asyncio
+async def test_call_openai_raises_when_all_photos_fail(monkeypatch):
+    """If EVERY photo-call fails (e.g. revoked API key -> 401 on all calls) the
+    session must surface as an analysis ERROR, not 'completed with 0 damages':
+    a dead key would otherwise render as a falsely intact vehicle."""
+    monkeypatch.setattr(ai_service.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(ai_service.settings, "openai_base_url", "")
+    monkeypatch.setattr(ai_service.settings, "openai_model", "gpt-4o-mini")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        photos = [
+            _make_fake_photo(tmpdir, "fronte", 0),
+            _make_fake_photo(tmpdir, "retro", 1),
+        ]
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                raise RuntimeError("Error code: 401 - User not found.")
+
+        class FakeChat:
+            completions = FakeCompletions()
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                self.chat = FakeChat()
+
+        with patch("openai.OpenAI", FakeClient):
+            with pytest.raises(RuntimeError, match="all 2 photo analyses failed"):
+                await _call_openai(photos, vehicle_type="piaggio")
+
+
 def test_build_api_kwargs_pass_temperature_schedule():
     """Pass 0 is the stable 0.2 baseline; passes >=1 run hotter to decorrelate.
     Reasoning models never receive a temperature, whatever the pass index."""

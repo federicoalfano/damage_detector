@@ -86,11 +86,22 @@ async def upload_photo(
         filename = f"{photo_id}.jpg"
         file_path = os.path.join(session_dir, filename)
 
-        # Reject non-image uploads (lenient when content_type is absent).
-        if file.content_type and not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=415, detail="Tipo file non supportato")
-
         content = await file.read()
+
+        # Reject non-image uploads. Some HTTP clients (e.g. Dart http) send
+        # application/octet-stream for camera files, so sniff magic bytes
+        # instead of trusting the declared content type alone.
+        declared_image = bool(file.content_type) and file.content_type.startswith(
+            "image/"
+        )
+        looks_like_image = (
+            content[:3] == b"\xff\xd8\xff"  # JPEG
+            or content[:8] == b"\x89PNG\r\n\x1a\n"  # PNG
+            or (content[:4] == b"RIFF" and content[8:12] == b"WEBP")  # WebP
+            or content[4:8] == b"ftyp"  # HEIC/HEIF/AVIF
+        )
+        if not (declared_image or looks_like_image):
+            raise HTTPException(status_code=415, detail="Tipo file non supportato")
 
         # Reject oversized uploads before touching disk/DB.
         if len(content) > settings.max_photo_size_bytes:

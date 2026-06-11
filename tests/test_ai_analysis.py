@@ -171,8 +171,14 @@ async def test_call_openai_multipass_unions_and_scores(monkeypatch):
     ]
     calls = {"n": 0}
 
+    consolidate_calls = {"n": 0}
+
     class FakeCompletions:
         def create(self, **kwargs):
+            text = kwargs["messages"][0]["content"][0]["text"]
+            if "Raggruppa" in text:  # final text-only consolidate pass
+                consolidate_calls["n"] += 1
+                return _fake_openai_response('{"gruppi": []}')
             i = calls["n"]
             calls["n"] += 1
             return _fake_openai_response(pass_payloads[i % len(pass_payloads)])
@@ -190,6 +196,7 @@ async def test_call_openai_multipass_unions_and_scores(monkeypatch):
             damages, _ = await _call_openai(photos, vehicle_type="piaggio")
 
     assert calls["n"] == 3  # 3 passes for the single photo
+    assert consolidate_calls["n"] == 1  # 2+ findings -> one dedup call
     by_type = {d["damage_type"]: d for d in damages}
     # Singleton critical finding must survive (recall-first, never consensus-filtered).
     assert set(by_type) == {"graffio", "crepa"}
@@ -428,3 +435,91 @@ async def test_analyze_session_no_photos():
         assert analysis is not None
         assert analysis.status == "completed"
         assert '"damages": []' in analysis.raw_response
+
+
+def test_salient_nouns_canonicalization():
+    """Paraphrases of the same physical damage produce the SAME dedup key:
+    damage-kind words and relational filler drop, component synonyms collapse."""
+    a = {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "graffi e rigature sulla parte inferiore della porta scorrevole destra, vicino al passaruota posteriore"}
+    b = {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "Graffi e abrasioni sulla parte posteriore della porta scorrevole destra, vicino al passaruota posteriore."}
+    assert ai_service._dedup_key(a) == ai_service._dedup_key(b)
+    assert len(ai_service._merge_damages([a], [b])) == 1
+
+    # L/R twins must NOT merge: side word survives canonicalization
+    left = {"damage_type": "rottura", "severity": "grave", "zone": "frontale",
+            "description": "faro anteriore sinistro rotto"}
+    right = {"damage_type": "rottura", "severity": "grave", "zone": "frontale",
+             "description": "faro anteriore destro rotto"}
+    assert ai_service._dedup_key(left) != ai_service._dedup_key(right)
+
+
+def _consolidate_fake_client(reply_json: str):
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return _fake_openai_response(reply_json)
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self):
+            self.chat = FakeChat()
+
+    return FakeClient()
+
+
+def test_consolidate_damages_merges_groups():
+    """LLM groups duplicate paraphrases; code merges keeping max severity/conf,
+    review flag only if EVERY sighting asked for it."""
+    damages = [
+        {"damage_type": "ammaccatura", "severity": "moderato", "zone": "laterale_destro",
+         "description": "ammaccatura sul parafango posteriore destro, sopra il passaruota",
+         "confidence": 1.0, "needs_review": False, "bounding_box": None},
+        {"damage_type": "ammaccatura", "severity": "lieve", "zone": "laterale_destro",
+         "description": "[DA VERIFICARE] fiancata posteriore ammaccata",
+         "confidence": 0.4, "needs_review": True, "bounding_box": "0,0,10,10"},
+        {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "graffi sulla portiera posteriore destra",
+         "confidence": 0.5, "needs_review": False, "bounding_box": None},
+    ]
+    client = _consolidate_fake_client('{"gruppi": [[0, 1]]}')
+    out = ai_service._consolidate_damages(client, "gpt-4o-mini", "lato_destro", damages)
+    assert len(out) == 2
+    merged = next(d for d in out if d["damage_type"] == "ammaccatura")
+    assert merged["severity"] == "moderato"
+    assert merged["confidence"] == 1.0
+    assert merged["needs_review"] is False
+    assert merged["bounding_box"] == "0,0,10,10"
+    # the graffio not named in any group is untouched
+    assert any(d["damage_type"] == "graffio" for d in out)
+
+
+def test_consolidate_damages_kind_guard_and_fallback():
+    """graffio+ammaccatura merge as ONE cosmetic damage (-> ammaccatura); a
+    structural crepa never merges into a cosmetic group; a garbage LLM reply
+    leaves the findings unchanged."""
+    damages = [
+        {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "graffi sopra la ruota", "confidence": 0.5, "needs_review": False},
+        {"damage_type": "ammaccatura", "severity": "moderato", "zone": "laterale_destro",
+         "description": "ammaccatura sopra la ruota posteriore", "confidence": 0.5, "needs_review": False},
+        {"damage_type": "crepa", "severity": "grave", "zone": "laterale_destro",
+         "description": "crepa sul vetro laterale", "confidence": 0.5, "needs_review": False},
+    ]
+    client = _consolidate_fake_client('{"gruppi": [[0, 1, 2]]}')
+    out = ai_service._consolidate_damages(client, "gpt-4o-mini", "lato_destro", damages)
+    assert len(out) == 2
+    merged = next(d for d in out if d["damage_type"] == "ammaccatura")
+    assert "ruota" in merged["description"]  # cosmetic pair folded into the dent
+    assert any(d["damage_type"] == "crepa" for d in out)  # structural untouched
+
+    client = _consolidate_fake_client("non-json garbage")
+    out = ai_service._consolidate_damages(client, "gpt-4o-mini", "lato_destro", damages)
+    assert out == damages  # best-effort: failure never loses findings

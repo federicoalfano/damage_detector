@@ -501,11 +501,39 @@ _NOUN_STOP = {
     "inferiore", "superiore", "centrale", "furgone", "veicolo", "presenta",
     "visibile", "evidente", "componente", "carrozzeria", "pannello", "plastica",
     "fiancata", "porzione", "regione", "verificare", "danno", "danni",
+    # relational words: "vicino al passaruota" and "sopra il passaruota" are the
+    # same place for dedup purposes
+    "vicino", "sopra", "sotto", "presso", "lungo", "accanto", "dietro",
+    "davanti", "altezza", "associati", "associata", "corrispondenza",
+}
+
+# Damage-kind words add no information beyond the entry's damage_type (already
+# the first element of _dedup_key) but their wording varies per pass
+# ("graffi"/"rigature"/"abrasioni" for the same scratch) and used to break the
+# noun-set equality. Prefix match to cover inflections (graffio/graffi/graffiata).
+_DAMAGE_WORD_PREFIXES = (
+    "ammacc", "graff", "rigat", "abras", "crep", "rott", "fratt",
+    "scheggiat", "spacc", "deformaz", "segn",
+)
+
+# Synonyms different passes use for the SAME component, mapped to one canonical
+# token (the union of 2 main + 2 tile passes re-describes each damage up to 4
+# ways). Gender variants of side words collapse too — the L/R distinction
+# survives because destro/destra and sinistro/sinistra map to different tokens.
+_NOUN_CANON = {
+    "parafango": "passaruota", "ruota": "passaruota", "ruote": "passaruota",
+    "portiera": "porta", "portiere": "porta", "sportello": "porta",
+    "destra": "destro", "sinistra": "sinistro",
 }
 
 # crepa and rottura describe the same physical break -> one dedup class so the
 # same cracked lens reported as both is collapsed (keep the more severe label).
 _TYPE_CLASS = {"crepa": "frattura", "rottura": "frattura"}
+
+# Surface-damage pair the consolidate pass may merge ACROSS type: the same
+# physical "ammaccatura con graffi" is reported as graffio by one pass and as
+# ammaccatura by another, producing a phantom twin for nearly every dent.
+_COSMETIC_TYPES = {"graffio", "ammaccatura"}
 
 # Map a described component to its true zone, so a wrap-around tail light seen in
 # a SIDE photo is recorded as 'posteriore', not 'laterale_*'.
@@ -602,12 +630,16 @@ def _pil_to_b64(im, quality: int = 90) -> str:
 
 
 def _salient_nouns(description: str) -> frozenset:
-    """Discriminating words (>=4 chars). Side words are KEPT so symmetric L/R
-    components ('fanale ... sinistro' vs '... destro') stay distinct."""
-    return frozenset(
-        w for w in re.findall(r"[a-zàèéìòù]{4,}", (description or "").lower())
-        if w not in _NOUN_STOP
-    )
+    """Discriminating words (>=4 chars), canonicalized. Side words are KEPT so
+    symmetric L/R components ('fanale ... sinistro' vs '... destro') stay
+    distinct; damage-kind words and relational filler are dropped, component
+    synonyms collapse via _NOUN_CANON."""
+    out = set()
+    for w in re.findall(r"[a-zàèéìòù]{4,}", (description or "").lower()):
+        if w in _NOUN_STOP or w.startswith(_DAMAGE_WORD_PREFIXES):
+            continue
+        out.add(_NOUN_CANON.get(w, w))
+    return frozenset(out)
 
 
 def _type_class(damage_type) -> str:
@@ -616,8 +648,16 @@ def _type_class(damage_type) -> str:
 
 def _dedup_key(d: dict) -> tuple:
     """(type-class, zone, salient-noun-set). crepa/rottura collapse to one class;
-    the noun set keeps left/right twins and distinct components apart."""
-    return (_type_class(d.get("damage_type")), d.get("zone"), _salient_nouns(d.get("description", "")))
+    the noun set keeps left/right twins and distinct components apart. In a
+    laterale_* zone the side is already encoded by the zone itself, so the side
+    word is redundant there and only splits paraphrases ('parafango posteriore
+    destro' vs 'passaruota posteriore' in the same lato_destro photo); for
+    frontale/posteriore zones it stays — it is what separates L/R twins."""
+    zone = d.get("zone")
+    nouns = _salient_nouns(d.get("description", ""))
+    if isinstance(zone, str) and zone.startswith("laterale"):
+        nouns = nouns - {"destro", "sinistro"}
+    return (_type_class(d.get("damage_type")), zone, nouns)
 
 
 def _merge_damages(base: list, extra: list) -> list:
@@ -673,6 +713,101 @@ def _merge_passes(pass_results: list[list[dict]], n_passes: int) -> list[dict]:
         # Blend: never let multi-pass agreement lower a tile-pass confidence.
         d["confidence"] = round(max(agree_conf, base_conf or 0.0), 2)
         out.append(d)
+    return out
+
+
+_CONSOLIDATE_PROMPT = """Sei un perito assicurativo. Qui sotto c'è l'elenco dei danni rilevati da più letture indipendenti della STESSA foto (angolo: {ang}). Letture diverse descrivono spesso lo STESSO danno fisico con parole diverse (es. "parafango sopra il passaruota" = "carrozzeria sopra la ruota posteriore" = "fiancata posteriore").
+
+Raggruppa SOLO le voci che sono chiaramente lo stesso danno fisico sullo stesso componente. NEL DUBBIO lascia separato. Non eliminare voci, non aggiungerne, non riscriverle.
+
+DANNI:
+{items}
+
+Rispondi SOLO con JSON, senza testo extra:
+{{"gruppi": [[0, 3], [1, 4]]}}
+dove ogni lista contiene gli indici delle voci che sono lo stesso danno fisico. Gli indici non presenti in nessun gruppo restano voci separate."""
+
+
+def _consolidate_damages(client, model, angle_label: str | None, damages: list) -> list:
+    """Final LLM dedup of one photo's merged findings (text-only, 1 cheap call).
+
+    The union of 2 main + 2 tile passes re-describes the same physical damage
+    with different wording, and _dedup_key's noun-set equality can't catch every
+    paraphrase ("portiera posteriore" vs "porta scorrevole vicino al
+    passaruota"). The model only returns GROUPS OF INDICES — the merge itself
+    happens here in code, so it cannot drop, invent or rewrite findings.
+    Guards: a group may only merge indices sharing (merge-class, zone), where
+    graffio+ammaccatura form ONE cosmetic class (passes routinely read the same
+    "ammaccatura con graffi" as either type, doubling every dent — the merged
+    entry becomes ammaccatura, the more substantive reading) while structural
+    classes (frattura, pezzo_mancante, ...) never merge across type. Any
+    parse/API failure returns the input unchanged (best-effort, recall never
+    loses)."""
+    if len(damages) < 2:
+        return damages
+    lines = "\n".join(
+        f"{i}. {d.get('damage_type')} {d.get('severity')} [{d.get('zone')}]: {d.get('description')}"
+        for i, d in enumerate(damages)
+    )
+    content = [{"type": "text", "text": _CONSOLIDATE_PROMPT.format(
+        ang=(angle_label or "").replace("_", " "), items=lines)}]
+    kwargs = _build_api_kwargs(model, content, pass_index=0)
+    if _is_reasoning_model(model):
+        kwargs["max_completion_tokens"] = 500
+    else:
+        kwargs["max_tokens"] = 500
+        kwargs["temperature"] = 0.0  # pure grouping, determinism over recall
+    try:
+        resp = _chat_with_retry(client, **kwargs)
+        _log_usage(resp, model, "consolidate")
+        txt = re.sub(r"<think>.*?</think>", "", resp.choices[0].message.content or "", flags=re.DOTALL)
+        txt = re.sub(r"```\w*", "", txt).replace("```", "").strip()
+        groups = json.loads(txt).get("gruppi", [])
+    except Exception as e:
+        logger.warning("consolidate pass failed angle=%s (%s) — keeping %d findings",
+                       angle_label, e, len(damages))
+        return damages
+
+    merged_idx: set[int] = set()
+    out: list = []
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        idx = [i for i in group if isinstance(i, int) and 0 <= i < len(damages) and i not in merged_idx]
+        # Same-kind guard: partition the group by (merge-class, zone) so an
+        # over-eager grouping can't fold a crepa into a graffio. graffio and
+        # ammaccatura share the cosmetic class on purpose: the same physical
+        # "ammaccatura con graffi" is read as either type by different passes.
+        by_kind: dict[tuple, list[int]] = {}
+        for i in idx:
+            dt = damages[i].get("damage_type")
+            cls = "cosmetico" if dt in _COSMETIC_TYPES else _type_class(dt)
+            by_kind.setdefault((cls, damages[i].get("zone")), []).append(i)
+        for members in by_kind.values():
+            if len(members) < 2:
+                continue
+            ds = [damages[i] for i in members]
+            best = max(ds, key=lambda d: (_SEV_RANK.get(d.get("severity"), 0),
+                                          len(d.get("description") or "")))
+            merged = dict(best)
+            # Mixed cosmetic group = one dent with scratches: report it as the
+            # more substantive ammaccatura, not as a separate graffio twin.
+            if any(d.get("damage_type") == "ammaccatura" for d in ds):
+                merged["damage_type"] = "ammaccatura"
+            merged["confidence"] = round(max((d.get("confidence") or 0.0) for d in ds), 2)
+            # A duplicate independently re-seen without the review flag is the
+            # stronger reading: review only if EVERY sighting asked for it.
+            merged["needs_review"] = all(bool(d.get("needs_review")) for d in ds)
+            if not merged["needs_review"] and (merged.get("description") or "").startswith("[DA VERIFICARE] "):
+                merged["description"] = merged["description"][len("[DA VERIFICARE] "):]
+            merged["bounding_box"] = next((d.get("bounding_box") for d in ds if d.get("bounding_box")), None)
+            out.append(merged)
+            merged_idx.update(members)
+    for i, d in enumerate(damages):
+        if i not in merged_idx:
+            out.append(d)
+    if len(out) < len(damages):
+        logger.info("consolidate angle=%s: %d -> %d findings", angle_label, len(damages), len(out))
     return out
 
 
@@ -1066,6 +1201,14 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
             logger.info(
                 "angle=%s tiled: +%d detail damages (%d unique after merge)",
                 photo.angle_label, len(tile_extra), len(merged) - before,
+            )
+
+        # Final paraphrase-dedup: the union above is recall-first and re-lists
+        # the same physical damage under different wording. One text-only call
+        # per photo (skipped under 2 findings) groups true duplicates.
+        if len(merged) > 1:
+            merged = await asyncio.to_thread(
+                _consolidate_damages, client, model, photo.angle_label, merged
             )
 
         raw = f"[multipass {len(ok)}/{passes}]\n" + (ok[0][1] or "")

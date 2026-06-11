@@ -566,7 +566,12 @@ _TILE_OVERLAP = 0.20
 # at both 768px and 1194px tiles), and the A/B on a real dented van showed the
 # 768px variant downgrading a clearly 'moderato' dent to 'lieve'. Keep 2x.
 _TILE_UPSCALE = 2.0
-_CONTEXT_THUMB_MAX = 512  # longest side of the whole-frame context thumbnail
+_CONTEXT_THUMB_MAX = 512
+# Concurrent tile calls per photo-run. Bounds PEAK MEMORY, not cost (each
+# worker briefly holds 2 upscaled crops ~8MB each while encoding): 3 workers
+# ~= 50MB/photo transient vs ~100MB with all 6 tiles in flight. Latency of a
+# tile run is HTTP-dominated, so 2 batches of 3 ~ doubles tile wall-time only.
+_TILE_WORKERS = 3  # longest side of the whole-frame context thumbnail
 
 
 def _pil_from_source(file_path: str, fallback_bytes: bytes | None = None):
@@ -682,37 +687,52 @@ def _downscale(im, max_side: int):
     return im.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
 
 
-def _make_grid(insp, ref=None) -> list:
-    """Overlapping grid (wide=3x2, tall=2x3). For each cell return
-    (pixel_box_str, upscaled_inspection_tile, upscaled_reference_tile_or_None).
-    The reference is cropped by the SAME relative box (it may differ in size/pose,
-    so this is an approximate region match — enough for component-level diffing)."""
-    from PIL import Image
-    W, H = insp.size
+def _grid_boxes(size) -> list:
+    """Overlapping grid boxes (wide=3x2, tall=2x3) as (x0, y0, x1, y1) tuples.
+
+    Boxes only — the actual crop/upscale/encode happens lazily inside the tile
+    worker (_encode_tile) so at most _TILE_WORKERS upscaled tiles exist at once.
+    Materializing all 12 PIL tiles (6 boxes x inspection+reference, 2x upscaled)
+    up-front held ~100MB per photo and OOM-killed the 512MB Render instance once
+    the app started uploading 1080p photos."""
+    W, H = size
     cols, rows = (3, 2) if W >= H else (2, 3)
     tw, th = W / cols, H / rows
-    rW, rH = (ref.size if ref is not None else (W, H))
-    sx, sy = (rW / W if W else 1.0), (rH / H if H else 1.0)
-    tiles = []
+    boxes = []
     for r in range(rows):
         for c in range(cols):
             x0 = max(0, int(c * tw - _TILE_OVERLAP * tw)); y0 = max(0, int(r * th - _TILE_OVERLAP * th))
             x1 = min(W, int((c + 1) * tw + _TILE_OVERLAP * tw)); y1 = min(H, int((r + 1) * th + _TILE_OVERLAP * th))
-            tw_px, th_px = max(1, int((x1 - x0) * _TILE_UPSCALE)), max(1, int((y1 - y0) * _TILE_UPSCALE))
-            t = insp.crop((x0, y0, x1, y1)).resize((tw_px, th_px), Image.LANCZOS)
-            rt = None
-            if ref is not None:
-                rx0, ry0 = int(x0 * sx), int(y0 * sy)
-                rx1, ry1 = min(rW, int(x1 * sx)), min(rH, int(y1 * sy))
-                if rx1 > rx0 and ry1 > ry0:
-                    rt = ref.crop((rx0, ry0, rx1, ry1)).resize((tw_px, th_px), Image.LANCZOS)
-            tiles.append((f"{x0},{y0},{x1},{y1}", t, rt))
-    return tiles
+            boxes.append((x0, y0, x1, y1))
+    return boxes
 
 
-def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index=0) -> list:
+def _encode_tile(insp, ref, box) -> tuple:
+    """Crop + 2x-upscale + JPEG/base64-encode one grid cell; PIL tiles are local
+    so they are freed before the HTTP call. The reference is cropped by the SAME
+    relative box (it may differ in size/pose, so this is an approximate region
+    match — enough for component-level diffing). Returns (tile_b64, ref_b64)."""
+    from PIL import Image
+    x0, y0, x1, y1 = box
+    W, H = insp.size
+    rW, rH = (ref.size if ref is not None else (W, H))
+    sx, sy = (rW / W if W else 1.0), (rH / H if H else 1.0)
+    tw_px, th_px = max(1, int((x1 - x0) * _TILE_UPSCALE)), max(1, int((y1 - y0) * _TILE_UPSCALE))
+    tile_b64 = _pil_to_b64(insp.crop((x0, y0, x1, y1)).resize((tw_px, th_px), Image.LANCZOS))
+    ref_b64 = None
+    if ref is not None:
+        rx0, ry0 = int(x0 * sx), int(y0 * sy)
+        rx1, ry1 = min(rW, int(x1 * sx)), min(rH, int(y1 * sy))
+        if rx1 > rx0 and ry1 > ry0:
+            ref_b64 = _pil_to_b64(ref.crop((rx0, ry0, rx1, ry1)).resize((tw_px, th_px), Image.LANCZOS))
+    return tile_b64, ref_b64
+
+
+def _inspect_tile(client, model, ang_human, box_str, tile_b64, ref_b64, context_b64, pass_index=0) -> list:
     """Inspect one region with context + reference; return normalized damage dicts.
 
+    Takes pre-encoded base64 JPEGs (not PIL images) so the heavy upscaled tiles
+    are already freed by the time we sit in the HTTP call.
     `pass_index` carries the tile-run temperature schedule (run 0 cool, run >=1
     hotter) so repeated tile runs decorrelate and the union finds complementary
     damage instead of the same finding twice."""
@@ -722,14 +742,14 @@ def _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64
             {"type": "text", "text": "IMMAGINE A — CONTESTO (intero veicolo):"},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{context_b64}"}},
         ]
-    if ref_tile is not None:
+    if ref_b64:
         content += [
             {"type": "text", "text": "IMMAGINE B — RIFERIMENTO INTEGRO di questa regione:"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_b64(ref_tile)}"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref_b64}"}},
         ]
     content += [
         {"type": "text", "text": "IMMAGINE C — REGIONE DA ISPEZIONARE (ingrandita):"},
-        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_b64(tile)}"}},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{tile_b64}"}},
     ]
     kwargs = _build_api_kwargs(model, content, pass_index)
     if _is_reasoning_model(model):
@@ -769,12 +789,21 @@ def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label, pass_index=0
         context_b64 = _pil_to_b64(_downscale(insp_im, _CONTEXT_THUMB_MAX), quality=70)
     except Exception as e:
         logger.warning("context thumbnail failed: %s", e)
-    tiles = _make_grid(insp_im, ref_im)
+
+    def _one(box) -> list:
+        # Crop/encode inside the worker: at most _TILE_WORKERS upscaled tiles
+        # alive at once (vs all 12 up-front — the 512MB-instance OOM).
+        try:
+            tile_b64, ref_b64 = _encode_tile(insp_im, ref_im, box)
+        except Exception as e:
+            logger.warning("tile encode failed box=%s: %s", box, e)
+            return []
+        box_str = ",".join(str(v) for v in box)
+        return _safe_inspect_tile(client, model, ang_human, box_str, tile_b64, ref_b64, context_b64, pass_index)
+
     raw_items: list = []
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for items in ex.map(
-            lambda t: _safe_inspect_tile(client, model, ang_human, t[0], t[1], t[2], context_b64, pass_index), tiles
-        ):
+    with ThreadPoolExecutor(max_workers=_TILE_WORKERS) as ex:
+        for items in ex.map(_one, _grid_boxes(insp_im.size)):
             raw_items.extend(items)
 
     out: list = []
@@ -814,9 +843,9 @@ def _tiled_detail_pass(client, model, insp_im, ref_im, angle_label, pass_index=0
     return out
 
 
-def _safe_inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index=0) -> list:
+def _safe_inspect_tile(client, model, ang_human, box_str, tile_b64, ref_b64, context_b64, pass_index=0) -> list:
     try:
-        return _inspect_tile(client, model, ang_human, box_str, tile, ref_tile, context_b64, pass_index)
+        return _inspect_tile(client, model, ang_human, box_str, tile_b64, ref_b64, context_b64, pass_index)
     except Exception as e:
         logger.warning("tile inspect failed box=%s: %s", box_str, e)
         return []
@@ -993,8 +1022,12 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
     client = OpenAI(**kwargs)
 
     passes = max(1, settings.vlm_passes)
+    # Photos go through a semaphore instead of all-at-once: each in-flight photo
+    # holds its PIL images + tile crops, and 4 concurrent 1080p photos OOM-killed
+    # the 512MB Render instance. Memory scales with this, wall-time inversely.
+    photo_sem = asyncio.Semaphore(max(1, settings.photo_concurrency))
 
-    async def _run_one(photo: Photo) -> tuple[str, list, str, str | None]:
+    async def _run_one_inner(photo: Photo) -> tuple[str, list, str, str | None]:
         """Run [passes] independent VLM passes for one photo, concurrently, and
         merge them union-wise (recall-first). A photo is only marked failed if
         EVERY pass failed — a partial failure still yields the surviving passes."""
@@ -1041,6 +1074,10 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
             photo.angle_label, len(merged), len(ok), passes,
         )
         return photo.angle_label, merged, raw, None
+
+    async def _run_one(photo: Photo) -> tuple[str, list, str, str | None]:
+        async with photo_sem:
+            return await _run_one_inner(photo)
 
     results = await asyncio.gather(*(_run_one(p) for p in photos))
 

@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     # only if the budget ceiling rises.
     # Only affects scudo (tiling is gated on the reference-image vehicle types).
     tile_passes: int = 2
+    # How many photos of a session are analyzed concurrently. Each in-flight
+    # photo holds PIL images + upscaled tile crops in memory; 4 concurrent
+    # 1080p photos OOM-killed the 512MB Render free instance (2026-06-11).
+    # Measured on the real 1080p session (peak RSS above interpreter baseline):
+    # concurrency 1 = +209MB, 2 = +281MB. With the ~150MB app baseline only 1
+    # leaves a safe margin under 512MB; raise via env on bigger instances.
+    photo_concurrency: int = 1
     data_dir: str = "./data"
     max_photo_size_bytes: int = 2 * 1024 * 1024  # 2MB
     cors_origins: list[str] = ["http://localhost:8000", "http://192.168.1.200:8000"]

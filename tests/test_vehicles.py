@@ -14,7 +14,12 @@ async def test_get_vehicles_returns_list():
     body = response.json()
     assert body["status"] == "success"
     assert isinstance(body["data"], list)
-    assert len(body["data"]) == 4
+    # At least the 4 seed vehicles are present. Sessions created with a new
+    # captured plate mint extra vehicles into the shared test DB, so this is a
+    # lower bound rather than an exact count.
+    seed_plates = {"AB12345", "EF11223", "IJ77889", "MN22334"}
+    listed_plates = {v["plate"] for v in body["data"]}
+    assert seed_plates.issubset(listed_plates)
 
 
 @pytest.mark.asyncio

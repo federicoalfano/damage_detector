@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, Response
 import shutil
 
 from sqlalchemy import select, delete
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.database import async_session
@@ -46,9 +47,49 @@ async def create_session(payload: SessionCreate):
             data = SessionResponse.model_validate(existing).model_dump()
             return success_response(data=data)
 
+        # Resolve-or-create the vehicle by captured plate. When the frontend
+        # sends a `plate` that isn't yet in the system, mint a new vehicle that
+        # inherits the referenced vehicle's type/model so the session links to
+        # the real plate (and the plate then shows up in the sessions list).
+        target_vehicle_id = payload.vehicle_id
+        if payload.plate and payload.plate.strip():
+            normalized_plate = "".join(payload.plate.split()).upper()
+
+            existing_vehicle = (
+                await session.execute(
+                    select(Vehicle).where(Vehicle.plate == normalized_plate)
+                )
+            ).scalars().first()
+
+            if existing_vehicle is not None:
+                target_vehicle_id = existing_vehicle.id
+            else:
+                new_vehicle = Vehicle(
+                    id=str(uuid_mod.uuid4()),
+                    plate=normalized_plate,
+                    type=vehicle.type,
+                    model=vehicle.model,
+                )
+                session.add(new_vehicle)
+                try:
+                    await session.flush()
+                    target_vehicle_id = new_vehicle.id
+                except IntegrityError:
+                    # Lost a race: another request inserted this plate first.
+                    # Roll back the failed INSERT and reuse the winner.
+                    await session.rollback()
+                    raced_vehicle = (
+                        await session.execute(
+                            select(Vehicle).where(Vehicle.plate == normalized_plate)
+                        )
+                    ).scalars().first()
+                    if raced_vehicle is None:
+                        raise
+                    target_vehicle_id = raced_vehicle.id
+
         new_session = Session(
             id=session_id,
-            vehicle_id=payload.vehicle_id,
+            vehicle_id=target_vehicle_id,
             user_id=payload.user_id,
             started_at=datetime.now(timezone.utc).isoformat(),
             status="in_progress",

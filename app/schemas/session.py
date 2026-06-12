@@ -6,6 +6,7 @@ class SessionCreate(BaseModel):
     user_id: str
     id: str | None = None
     name: str | None = None
+    plate: str | None = None
 
 
 class SessionResponse(BaseModel):

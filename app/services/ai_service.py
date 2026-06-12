@@ -727,9 +727,19 @@ Rispondi SOLO con JSON, senza testo extra:
 {{"gruppi": [[0, 3], [1, 4]]}}
 dove ogni lista contiene gli indici delle voci che sono lo stesso danno fisico. Gli indici non presenti in nessun gruppo restano voci separate."""
 
+# Appended (verbatim, AFTER .format of the main prompt) only when the gridded
+# photo could be rendered and attached. Asks for one extra JSON field — a map
+# from input index to grid cell — and restates the no-add/no-drop contract.
+_CONSOLIDATE_GRID_SUFFIX = """
 
-def _consolidate_damages(client, model, angle_label: str | None, damages: list) -> list:
-    """Final LLM dedup of one photo's merged findings (text-only, 1 cheap call).
+IMMAGINE ALLEGATA: la STESSA foto con una griglia numerata sovraimpressa (celle 1-6). Per ogni voce dell'elenco indica anche in quale cella della griglia il danno è visibile, aggiungendo al JSON la mappa "celle" (chiave = indice della voce, valore = numero di cella 1-6, oppure null se non determinabile):
+{"gruppi": [[0, 3]], "celle": {"0": 2, "3": 2, "1": 5}}
+NON aggiungere, NON eliminare e NON inventare danni: limitati a raggruppare le voci dell'elenco dato e ad assegnare le celle."""
+
+
+def _consolidate_damages(client, model, angle_label: str | None, damages: list,
+                         photo=None) -> list:
+    """Final LLM dedup of one photo's merged findings (1 cheap call).
 
     The union of 2 main + 2 tile passes re-describes the same physical damage
     with different wording, and _dedup_key's noun-set equality can't catch every
@@ -742,27 +752,64 @@ def _consolidate_damages(client, model, angle_label: str | None, damages: list) 
     entry becomes ammaccatura, the more substantive reading) while structural
     classes (frattura, pezzo_mancante, ...) never merge across type. Any
     parse/API failure returns the input unchanged (best-effort, recall never
-    loses)."""
+    loses).
+
+    Localization piggyback (2026-06-12): when `photo` decodes, this SAME call
+    also carries a downscaled copy of the photo with a numbered 1-6 grid drawn
+    on it (image cost on OpenRouter is flat per call, so this is free) and the
+    model returns, per INPUT INDEX, the grid cell where that damage is visible
+    ("celle"). Cells only FILL bounding boxes that are still null after the
+    merge — tile-pass boxes are ground truth and are never overwritten — by
+    mapping cell N to _grid_boxes(original_size)[N-1], the same rect-string
+    format the tile pass emits. Everything about the cells is best-effort: a
+    failed overlay/encode, a missing or garbled "celle", or any exception in
+    the mapping degrades to exactly the pre-grid behavior (consolidated list,
+    boxes untouched)."""
     if len(damages) < 2:
         return damages
+    # Render the numbered-grid copy of the photo (optional, never blocking).
+    grid_b64 = None
+    insp_size = None
+    if photo is not None:
+        try:
+            insp_im = _pil_from_source(photo.file_path, getattr(photo, "image_data", None))
+            if insp_im is not None:
+                insp_size = insp_im.size
+                grid_b64 = _grid_overlay_b64(insp_im)
+        except Exception as e:
+            logger.warning("consolidate grid overlay failed angle=%s: %s", angle_label, e)
     lines = "\n".join(
         f"{i}. {d.get('damage_type')} {d.get('severity')} [{d.get('zone')}]: {d.get('description')}"
         for i, d in enumerate(damages)
     )
-    content = [{"type": "text", "text": _CONSOLIDATE_PROMPT.format(
-        ang=(angle_label or "").replace("_", " "), items=lines)}]
+    prompt = _CONSOLIDATE_PROMPT.format(
+        ang=(angle_label or "").replace("_", " "), items=lines)
+    content = [{"type": "text", "text": prompt}]
+    if grid_b64:
+        content[0]["text"] = prompt + _CONSOLIDATE_GRID_SUFFIX
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{grid_b64}"}})
     kwargs = _build_api_kwargs(model, content, pass_index=0)
+    # Headroom for the "celle" map when the grid rides along; text-only path
+    # keeps the historical 500 so behavior there is bit-identical.
+    limit = 700 if grid_b64 else 500
     if _is_reasoning_model(model):
-        kwargs["max_completion_tokens"] = 500
+        kwargs["max_completion_tokens"] = limit
     else:
-        kwargs["max_tokens"] = 500
+        kwargs["max_tokens"] = limit
         kwargs["temperature"] = 0.0  # pure grouping, determinism over recall
     try:
         resp = _chat_with_retry(client, **kwargs)
         _log_usage(resp, model, "consolidate")
         txt = re.sub(r"<think>.*?</think>", "", resp.choices[0].message.content or "", flags=re.DOTALL)
         txt = re.sub(r"```\w*", "", txt).replace("```", "").strip()
-        groups = json.loads(txt).get("gruppi", [])
+        parsed = json.loads(txt)
+        groups = parsed.get("gruppi", [])
+        # Only trust "celle" if we actually asked for it (grid attached) and it
+        # is the documented index->cell map; anything else is ignored.
+        celle = parsed.get("celle") if grid_b64 else None
+        if not isinstance(celle, dict):
+            celle = {}
     except Exception as e:
         logger.warning("consolidate pass failed angle=%s (%s) — keeping %d findings",
                        angle_label, e, len(damages))
@@ -770,6 +817,7 @@ def _consolidate_damages(client, model, angle_label: str | None, damages: list) 
 
     merged_idx: set[int] = set()
     out: list = []
+    out_members: list[list[int]] = []  # input indices behind each output entry
     for group in groups:
         if not isinstance(group, list):
             continue
@@ -802,10 +850,35 @@ def _consolidate_damages(client, model, angle_label: str | None, damages: list) 
                 merged["description"] = merged["description"][len("[DA VERIFICARE] "):]
             merged["bounding_box"] = next((d.get("bounding_box") for d in ds if d.get("bounding_box")), None)
             out.append(merged)
+            out_members.append(members)
             merged_idx.update(members)
     for i, d in enumerate(damages):
         if i not in merged_idx:
             out.append(d)
+            out_members.append([i])
+    # HARD GUARD: consolidation may NEVER yield more findings than it was given.
+    # Structurally impossible (the model only returns indices into the input and
+    # each index is consumed at most once), but enforced in code regardless.
+    if len(out) > len(damages):
+        logger.warning("consolidate angle=%s produced %d > %d entries — keeping originals",
+                       angle_label, len(out), len(damages))
+        return damages
+    # Grid localization: fill ONLY null bounding boxes from the model's cell
+    # assignment (any constituent index of a merged entry may supply the cell).
+    # Tile-pass boxes are ground truth and are never overwritten. Defensive:
+    # no exception here may alter detection results.
+    if grid_b64 and insp_size and celle:
+        try:
+            for j, members in enumerate(out_members):
+                if out[j].get("bounding_box"):
+                    continue
+                for i in members:
+                    rect = _cell_rect_str(insp_size, celle.get(str(i), celle.get(i)))
+                    if rect:
+                        out[j] = {**out[j], "bounding_box": rect}
+                        break
+        except Exception as e:
+            logger.warning("consolidate cell localization failed angle=%s: %s", angle_label, e)
     if len(out) < len(damages):
         logger.info("consolidate angle=%s: %d -> %d findings", angle_label, len(damages), len(out))
     return out
@@ -840,6 +913,63 @@ def _grid_boxes(size) -> list:
             x1 = min(W, int((c + 1) * tw + _TILE_OVERLAP * tw)); y1 = min(H, int((r + 1) * th + _TILE_OVERLAP * th))
             boxes.append((x0, y0, x1, y1))
     return boxes
+
+
+def _cell_rect_str(size, cell) -> str | None:
+    """Map a 1-based grid cell number onto the OVERLAPPING _grid_boxes rect of
+    the original photo, as the same "x0,y0,x1,y1" pixel string the tile pass
+    emits. Returns None for anything that is not a valid cell (bool, 0, 7,
+    "x", None, ...) so garbage from the model can never produce a box."""
+    if isinstance(cell, bool):
+        return None
+    try:
+        c = int(cell)
+    except (TypeError, ValueError):
+        return None
+    boxes = _grid_boxes(size)
+    if not 1 <= c <= len(boxes):
+        return None
+    return ",".join(str(v) for v in boxes[c - 1])
+
+
+def _grid_overlay_b64(insp_im) -> str | None:
+    """Downscaled copy of the inspection photo with the NOMINAL (non-overlapping)
+    grid partition drawn on it: cell border lines + big numbered labels 1..6
+    (yellow with black outline) at cell centers.
+
+    Same wide=3x2 / tall=2x3 orientation and ROW-MAJOR numbering as _grid_boxes,
+    so "cella N" maps back to _grid_boxes(original_size)[N-1] via _cell_rect_str.
+    The visual uses the non-overlapping partition because overlapping rectangles
+    are unreadable as an overlay; the ~20% slack of the real rect absorbs the
+    coarseness. Returns None on ANY failure — callers degrade to the plain
+    text-only consolidate."""
+    try:
+        from PIL import ImageDraw, ImageFont
+        im = _downscale(insp_im, _CONTEXT_THUMB_MAX).copy()
+        W, H = im.size
+        cols, rows = (3, 2) if W >= H else (2, 3)
+        draw = ImageDraw.Draw(im)
+        for c in range(1, cols):
+            x = round(W * c / cols)
+            draw.line([(x, 0), (x, H)], fill="black", width=5)
+            draw.line([(x, 0), (x, H)], fill="#FFC400", width=2)
+        for r in range(1, rows):
+            y = round(H * r / rows)
+            draw.line([(0, y), (W, y)], fill="black", width=5)
+            draw.line([(0, y), (W, y)], fill="#FFC400", width=2)
+        try:
+            font = ImageFont.load_default(size=max(24, min(W, H) // 6))
+        except Exception:  # very old Pillow: fixed-size bitmap fallback
+            font = ImageFont.load_default()
+        for n in range(rows * cols):
+            r, c = divmod(n, cols)
+            cx, cy = W * (2 * c + 1) / (2 * cols), H * (2 * r + 1) / (2 * rows)
+            draw.text((cx, cy), str(n + 1), font=font, anchor="mm",
+                      fill="#FFC400", stroke_width=4, stroke_fill="black")
+        return _pil_to_b64(im, quality=70)
+    except Exception as e:
+        logger.warning("grid overlay render failed: %s", e)
+        return None
 
 
 def _encode_tile(insp, ref, box) -> tuple:
@@ -1203,12 +1333,14 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
                 photo.angle_label, len(tile_extra), len(merged) - before,
             )
 
-        # Final paraphrase-dedup: the union above is recall-first and re-lists
-        # the same physical damage under different wording. One text-only call
-        # per photo (skipped under 2 findings) groups true duplicates.
+        # Final paraphrase-dedup + localization: the union above is recall-first
+        # and re-lists the same physical damage under different wording. One call
+        # per photo (skipped under 2 findings) groups true duplicates and — via
+        # a numbered-grid copy of the photo riding on that same call — fills the
+        # bounding boxes the full-photo passes leave null (tile boxes win).
         if len(merged) > 1:
             merged = await asyncio.to_thread(
-                _consolidate_damages, client, model, photo.angle_label, merged
+                _consolidate_damages, client, model, photo.angle_label, merged, photo
             )
 
         raw = f"[multipass {len(ok)}/{passes}]\n" + (ok[0][1] or "")

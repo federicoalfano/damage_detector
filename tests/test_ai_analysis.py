@@ -523,3 +523,167 @@ def test_consolidate_damages_kind_guard_and_fallback():
     client = _consolidate_fake_client("non-json garbage")
     out = ai_service._consolidate_damages(client, "gpt-4o-mini", "lato_destro", damages)
     assert out == damages  # best-effort: failure never loses findings
+
+
+def test_cell_rect_str_mapping():
+    """1-based grid cell -> overlapping _grid_boxes rect string ("x0,y0,x1,y1"),
+    row-major, for both wide (3x2) and tall (2x3) photos; garbage -> None."""
+    wide = (600, 300)   # 3 cols x 2 rows, nominal tile 200x150, 20% overlap
+    assert ai_service._cell_rect_str(wide, 1) == "0,0,240,180"
+    assert ai_service._cell_rect_str(wide, 6) == "360,120,600,300"
+    tall = (300, 600)   # 2 cols x 3 rows, nominal tile 150x200
+    assert ai_service._cell_rect_str(tall, 1) == "0,0,180,240"
+    assert ai_service._cell_rect_str(tall, 6) == "120,360,300,600"
+    # every cell matches the _grid_boxes rect at the same (row-major) index,
+    # including int-like strings the model may emit as JSON map values
+    for size in (wide, tall, (1920, 1080)):
+        boxes = ai_service._grid_boxes(size)
+        assert len(boxes) == 6
+        for n, box in enumerate(boxes, start=1):
+            expected = ",".join(str(v) for v in box)
+            assert ai_service._cell_rect_str(size, n) == expected
+            assert ai_service._cell_rect_str(size, str(n)) == expected
+    # garbage in -> None out (out of range, bool, non-numeric, missing)
+    for bad in (0, 7, -1, "0", "7", "x", "", None, True, False, [], {}):
+        assert ai_service._cell_rect_str(wide, bad) is None
+
+
+def _photo_stub(file_path="/nonexistent/photo.jpg"):
+    """Photo-like object for _consolidate_damages; path does not exist so
+    _pil_from_source returns None unless monkeypatched."""
+    return SimpleNamespace(file_path=file_path, image_data=None)
+
+
+def test_consolidate_grid_fills_null_boxes_only(monkeypatch):
+    """A valid 'cella' fills a NULL bounding_box with the matching _grid_boxes
+    rect of the ORIGINAL photo size; an existing tile-pass box is NEVER
+    overwritten; entries the model gives no cell for stay null. The gridded
+    image rides on the SAME single consolidate call (zero extra calls)."""
+    from PIL import Image
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: Image.new("RGB", (600, 300), "gray"))
+    damages = [
+        {"damage_type": "graffio", "severity": "moderato", "zone": "frontale",
+         "description": "graffio sul cofano", "confidence": 1.0,
+         "needs_review": False, "bounding_box": None},
+        {"damage_type": "crepa", "severity": "grave", "zone": "frontale",
+         "description": "crepa sul faro destro", "confidence": 0.5,
+         "needs_review": False, "bounding_box": "10,10,50,50"},
+        {"damage_type": "ammaccatura", "severity": "lieve", "zone": "frontale",
+         "description": "ammaccatura sul paraurti", "confidence": 0.4,
+         "needs_review": True, "bounding_box": None},
+    ]
+    client = _consolidate_fake_client('{"gruppi": [], "celle": {"0": 2, "1": 5}}')
+    out = ai_service._consolidate_damages(
+        client, "gpt-4o-mini", "fronte", damages, photo=_photo_stub())
+    assert len(out) == 3
+    by_type = {d["damage_type"]: d for d in out}
+    assert by_type["graffio"]["bounding_box"] == ai_service._cell_rect_str((600, 300), 2)
+    assert by_type["crepa"]["bounding_box"] == "10,10,50,50"   # tile box untouched
+    assert by_type["ammaccatura"]["bounding_box"] is None      # no cell -> stays null
+    # piggyback contract: exactly ONE call, carrying the gridded image + the
+    # extended prompt; the caller's input dicts are not mutated.
+    calls = client.chat.completions.calls
+    assert len(calls) == 1
+    content = calls[0]["messages"][0]["content"]
+    assert any(part.get("type") == "image_url" for part in content)
+    assert '"celle"' in content[0]["text"]
+    assert damages[0]["bounding_box"] is None
+
+
+def test_consolidate_grid_cell_localizes_merged_group(monkeypatch):
+    """A merged group with all-null boxes takes its box from ANY member index
+    the model assigned a cell to."""
+    from PIL import Image
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: Image.new("RGB", (300, 600), "gray"))
+    damages = [
+        {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "graffi sopra la ruota", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+        {"damage_type": "ammaccatura", "severity": "moderato", "zone": "laterale_destro",
+         "description": "ammaccatura sopra la ruota posteriore", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+    ]
+    # cell only on member 1 — the merged entry must still get localized (tall photo)
+    client = _consolidate_fake_client('{"gruppi": [[0, 1]], "celle": {"1": 6}}')
+    out = ai_service._consolidate_damages(
+        client, "gpt-4o-mini", "lato_destro", damages, photo=_photo_stub())
+    assert len(out) == 1
+    assert out[0]["bounding_box"] == "120,360,300,600"  # _grid_boxes((300,600))[5]
+
+
+def test_consolidate_garbage_cella_leaves_boxes_null(monkeypatch):
+    """Out-of-range, non-numeric or missing 'cella' values must never produce a
+    bounding box; the consolidated findings are otherwise unchanged."""
+    from PIL import Image
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: Image.new("RGB", (600, 300), "gray"))
+    damages = [
+        {"damage_type": "graffio", "severity": "lieve", "zone": "frontale",
+         "description": f"graffio numero {i}", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None}
+        for i in range(4)
+    ]
+    client = _consolidate_fake_client(
+        '{"gruppi": [], "celle": {"0": 0, "1": 7, "2": "x"}}')  # index 3 missing
+    out = ai_service._consolidate_damages(
+        client, "gpt-4o-mini", "fronte", damages, photo=_photo_stub())
+    assert out == damages  # nothing merged, no box materialized
+    assert all(d["bounding_box"] is None for d in out)
+
+    # "celle" that is not even a map is ignored wholesale
+    client = _consolidate_fake_client('{"gruppi": [], "celle": [1, 2, 3, 4]}')
+    out = ai_service._consolidate_damages(
+        client, "gpt-4o-mini", "fronte", damages, photo=_photo_stub())
+    assert all(d["bounding_box"] is None for d in out)
+
+
+def test_consolidate_never_yields_more_than_input():
+    """Adversarial reply referencing indices that do not exist: extras are
+    dropped, the output can never exceed the input, and every output entry is
+    one of (or a merge of) the given findings — nothing invented."""
+    damages = [
+        {"damage_type": "graffio", "severity": "moderato", "zone": "laterale_destro",
+         "description": "graffi sopra la ruota", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+        {"damage_type": "ammaccatura", "severity": "moderato", "zone": "laterale_destro",
+         "description": "ammaccatura sopra la ruota posteriore", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+        {"damage_type": "crepa", "severity": "grave", "zone": "laterale_destro",
+         "description": "crepa sul vetro laterale", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+    ]
+    client = _consolidate_fake_client(
+        '{"gruppi": [[0, 1], [5, 6, 7], [2, 99], [1, 0]]}')
+    out = ai_service._consolidate_damages(client, "gpt-4o-mini", "lato_destro", damages)
+    assert len(out) <= len(damages)
+    in_desc = {d["description"] for d in damages}
+    assert all(d["description"] in in_desc for d in out)  # no invented findings
+    # phantom group [5,6,7] contributed nothing; [0,1] merged; crepa survived
+    assert len(out) == 2
+    assert any(d["damage_type"] == "crepa" for d in out)
+
+
+def test_consolidate_without_grid_stays_text_only():
+    """No photo (or an undecodable one) -> exactly today's behavior: text-only
+    prompt, no image part, no 'celle' request, boxes untouched."""
+    damages = [
+        {"damage_type": "graffio", "severity": "lieve", "zone": "frontale",
+         "description": "graffio cofano", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+        {"damage_type": "crepa", "severity": "grave", "zone": "frontale",
+         "description": "crepa faro", "confidence": 0.5,
+         "needs_review": False, "bounding_box": None},
+    ]
+    for photo in (None, _photo_stub()):  # stub path does not exist -> PIL None
+        client = _consolidate_fake_client('{"gruppi": []}')
+        out = ai_service._consolidate_damages(
+            client, "gpt-4o-mini", "fronte", damages, photo=photo)
+        assert out == damages
+        content = client.chat.completions.calls[0]["messages"][0]["content"]
+        assert all(part.get("type") != "image_url" for part in content)
+        assert '"celle"' not in content[0]["text"]
+        assert content[0]["text"].rstrip().endswith("voci separate.")
+        # historical token cap preserved on the text-only path
+        assert client.chat.completions.calls[0].get("max_tokens") == 500

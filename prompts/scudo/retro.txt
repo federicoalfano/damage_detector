@@ -47,6 +47,7 @@ DEVI esaminare ENTRAMBI i fanali in dettaglio. SEGNALA un danno se vedi UNO QUAL
 - pezzo di fanale chiaramente assente nel suo alloggiamento
 NON segnalare: riflessi di luce, polvere, sporco, condensa lieve, bordi normali del design.
 IMPORTANTE: se vedi UN fanale chiaramente rotto/spaccato/forato, è un danno reale — NON metterlo come "ok" per prudenza. Distingui un fanale integro da uno con frammento mancante guardando se il colore della lente è continuo o se appare uno spazio scuro/nero.
+COLORE LENTE (indizio chiave): nel RIFERIMENTO integro la lente del fanale è prevalentemente ROSSA. Se nell'immagine da ispezionare ampie zone della lente appaiono BIANCHE/CHIARE/incolori dove il riferimento è rosso, la lente è rotta o mancante: segnala "danno" nella checklist, MAI "ok". Applica questo confronto a CIASCUNO dei due fanali, indipendentemente l'uno dall'altro.
 
 === ISPEZIONE PARAURTI INFERIORE (regole anti-falso-positivo) ===
 Il sotto-paraurti posteriore è spesso plastica nera, poco illuminata. Verifica la presenza ma NON forzare la scoperta di danni.

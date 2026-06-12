@@ -932,6 +932,31 @@ def _cell_rect_str(size, cell) -> str | None:
     return ",".join(str(v) for v in boxes[c - 1])
 
 
+def _mirror_cell_index(size, idx: int) -> int:
+    """Mirror a 0-based ROW-MAJOR _grid_boxes cell index horizontally:
+    same row, mirrored column (wide=3x2 -> 0<->2, 1 self; tall=2x3 -> 0<->1)."""
+    W, H = size
+    cols = 3 if W >= H else 2
+    r, c = divmod(idx, cols)
+    return r * cols + (cols - 1 - c)
+
+
+def _mirror_rect_str(rect, size) -> str | None:
+    """Mirror an 'x0,y0,x1,y1' pixel rect horizontally on an image of `size`:
+    x -> W - x with x0/x1 swapped, clamped to the frame. Returns None for any
+    unparseable or degenerate rect so garbage can never become a crop box."""
+    W, H = size
+    try:
+        x0, y0, x1, y1 = (int(float(v)) for v in str(rect).split(","))
+    except (TypeError, ValueError):
+        return None
+    mx0, mx1 = max(0, W - x1), min(W, W - x0)
+    my0, my1 = max(0, y0), min(H, y1)
+    if mx1 <= mx0 or my1 <= my0:
+        return None
+    return f"{mx0},{my0},{mx1},{my1}"
+
+
 def _grid_overlay_b64(insp_im) -> str | None:
     """Downscaled copy of the inspection photo with the NOMINAL (non-overlapping)
     grid partition drawn on it: cell border lines + big numbered labels 1..6
@@ -1170,6 +1195,160 @@ def _run_tiled_for_photo(client, model, photo, vehicle_type) -> list:
     return merged
 
 
+# --- Symmetric-light twin recheck ----------------------------------------
+# Real incident (2026-06-12): BOTH tail lights shattered, checklist said "ok"
+# for both, the tile pass caught only ONE side. Lights break in pairs far more
+# often than independent passes detect them, so a one-sided light finding is a
+# strong prior that the mirrored region deserves one extra look.
+
+
+def _light_side(text: str) -> str | None:
+    """Return 'sinistr'/'destr' when the text names EXACTLY one side, else None."""
+    has_sx, has_dx = "sinistr" in text, "destr" in text
+    if has_sx == has_dx:  # neither, or both ("fanali sinistro e destro")
+        return None
+    return "sinistr" if has_sx else "destr"
+
+
+def _twin_recheck_target(damages: list) -> tuple[dict, str] | None:
+    """Pick the damage that triggers the twin recheck, if any.
+
+    Trigger: at least one light finding (_LIGHT_KW) naming exactly ONE side,
+    AND no light finding covering the OPPOSITE side in the same list. Returns
+    (triggering_damage, opposite_side_word). The trigger must carry a
+    bounding_box (tile box or consolidate grid-cell fill) — without one there
+    is no region to mirror, so we skip rather than guess.
+    """
+    by_side: dict[str, list] = {}
+    for d in damages:
+        text = ((d.get("description") or "") + " " + str(d.get("componente") or "")).lower()
+        if not any(k in text for k in _LIGHT_KW):
+            continue
+        side = _light_side(text)
+        if side:
+            by_side.setdefault(side, []).append(d)
+    if len(by_side) != 1:  # no one-sided light damage, or both sides covered
+        return None
+    side, candidates = next(iter(by_side.items()))
+    trigger = next((d for d in candidates if d.get("bounding_box")), None)
+    if trigger is None:
+        logger.info("twin recheck fanale: trigger has no bounding_box — skipping")
+        return None
+    return trigger, ("destr" if side == "sinistr" else "sinistr")
+
+
+def _twin_light_recheck(client, model, photo, vehicle_type, damages: list) -> list:
+    """ONE extra mirrored tile inspection when exactly one side's light is damaged.
+
+    Mirrors the triggering finding's region horizontally (grid-cell boxes map to
+    the same-row mirrored-column cell; arbitrary rects mirror arithmetically)
+    and runs a single _inspect_tile call on it, reference crop attached when the
+    integro reference exists. Contract:
+      - at most ONE extra call per photo, only when triggered;
+      - only LIGHT findings from the recheck are kept, FORCED needs_review=True
+        at confidence <= 0.4 with the mirrored rect as bounding_box;
+      - existing findings are NEVER altered or removed; any failure returns the
+        input list unchanged.
+    Gated to reference vehicle types (scudo): the tile prompt is van-specific
+    and scooters never run the tile pass — the simpler safe option.
+    """
+    try:
+        if not REFERENCE_SUBDIR_BY_VEHICLE_TYPE.get(vehicle_type or ""):
+            return damages
+        # Mirroring x only makes sense where both lights are in frame: a
+        # wrap-around tail light seen in a SIDE photo mirrors onto the other
+        # END of the vehicle, not onto its twin.
+        if photo.angle_label not in ("fronte", "retro"):
+            return damages
+        target = _twin_recheck_target(damages)
+        if target is None:
+            return damages
+        trigger, _opp_side = target
+        insp_im = _pil_from_source(photo.file_path, getattr(photo, "image_data", None))
+        if insp_im is None:
+            return damages
+
+        # Grid-cell boxes mirror via the cell index (exact even when W/cols
+        # truncation makes the arithmetic mirror off-by-one); any other rect
+        # mirrors arithmetically with clamping.
+        boxes = _grid_boxes(insp_im.size)
+        box_strs = [",".join(str(v) for v in b) for b in boxes]
+        if trigger.get("bounding_box") in box_strs:
+            midx = _mirror_cell_index(insp_im.size, box_strs.index(trigger["bounding_box"]))
+            mbox = boxes[midx]
+            mirror_str = box_strs[midx]
+        else:
+            mirror_str = _mirror_rect_str(trigger.get("bounding_box"), insp_im.size)
+            if mirror_str is None:
+                return damages
+            mbox = tuple(int(v) for v in mirror_str.split(","))
+        logger.info(
+            "twin recheck fanale angle=%s: '%s' names one side only — inspecting mirrored region %s",
+            photo.angle_label, (trigger.get("description") or "")[:80], mirror_str,
+        )
+
+        ref_im = None
+        ref_path = _reference_image_path(vehicle_type, photo.angle_label)
+        if ref_path:
+            try:
+                from PIL import Image, ImageOps
+                with Image.open(ref_path) as r:
+                    ref_im = ImageOps.exif_transpose(r).convert("RGB")
+            except Exception as e:
+                logger.warning("twin recheck: reference open failed (%s) — inspecting without reference", e)
+        context_b64 = None
+        try:
+            context_b64 = _pil_to_b64(_downscale(insp_im, _CONTEXT_THUMB_MAX), quality=70)
+        except Exception as e:
+            logger.warning("twin recheck: context thumbnail failed: %s", e)
+        tile_b64, ref_b64 = _encode_tile(insp_im, ref_im, mbox)
+        ang_human = (photo.angle_label or "").replace("_", " ")
+        items = _inspect_tile(client, model, ang_human, mirror_str, tile_b64, ref_b64,
+                              context_b64, pass_index=0)
+
+        extra: list = []
+        for it in items:
+            dt, sev = it.get("damage_type"), it.get("severity")
+            if dt not in _VALID_DAMAGE_TYPES or sev not in _VALID_SEVERITIES:
+                continue
+            if dt in _GRAVE_ONLY_TYPES and sev != "grave":
+                continue
+            comp = str(it.get("componente") or "")
+            desc = (it.get("description") or comp)[:160]
+            blob = (comp + " " + desc).lower()
+            if not any(k in blob for k in _LIGHT_KW):
+                continue  # the recheck may ONLY add light findings
+            if _is_background(blob):
+                continue
+            if not desc.startswith("[DA VERIFICARE]"):
+                desc = "[DA VERIFICARE] " + desc
+            d = {
+                "damage_type": dt, "severity": sev,
+                "zone": _zone_from_component(blob, photo.angle_label),
+                "description": desc,
+                "bounding_box": mirror_str,
+                "confidence": 0.4,
+                "needs_review": True,
+            }
+            _apply_severity_floor(d)
+            extra.append(d)
+        if not extra:
+            logger.info("twin recheck fanale angle=%s: mirrored region clean", photo.angle_label)
+            return damages
+        merged = _merge_damages(damages, extra)
+        logger.info(
+            "twin recheck fanale angle=%s: +%d light finding(s) on mirrored side",
+            photo.angle_label, len(merged) - len(damages),
+        )
+        return merged
+    except Exception as e:
+        logger.warning(
+            "twin recheck failed angle=%s: %s — keeping findings unchanged",
+            getattr(photo, "angle_label", "?"), e,
+        )
+        return damages
+
+
 def _call_openai_single(
     client, model: str, photo: Photo, vehicle_type: str | None, pass_index: int = 0
 ) -> tuple[list, str]:
@@ -1341,6 +1520,15 @@ async def _call_openai(photos: list, vehicle_type: str | None = None) -> tuple[l
         if len(merged) > 1:
             merged = await asyncio.to_thread(
                 _consolidate_damages, client, model, photo.angle_label, merged, photo
+            )
+
+        # Symmetric-light twin recheck: lights shatter in PAIRS more often than
+        # the passes detect them (real case: both tail lights gone, one found).
+        # When exactly one side's light is flagged, ONE extra mirrored tile call
+        # probes the opposite light. Add-only, needs_review-forced, best-effort.
+        if merged:
+            merged = await asyncio.to_thread(
+                _twin_light_recheck, client, model, photo, vehicle_type, merged
             )
 
         raw = f"[multipass {len(ok)}/{passes}]\n" + (ok[0][1] or "")

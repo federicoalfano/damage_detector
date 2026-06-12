@@ -665,6 +665,136 @@ def test_consolidate_never_yields_more_than_input():
     assert any(d["damage_type"] == "crepa" for d in out)
 
 
+def test_mirror_rect_and_cell_math():
+    """Horizontal mirror math for the twin-light recheck: arbitrary rects flip
+    x -> W - x (swapped, clamped); grid cells mirror row-major to the same row,
+    mirrored column — in both wide (3x2) and tall (2x3) orientations."""
+    wide, tall = (600, 300), (300, 600)
+    # arbitrary rect on a wide image
+    assert ai_service._mirror_rect_str("400,100,550,200", wide) == "50,100,200,200"
+    # full-frame rect mirrors onto itself
+    assert ai_service._mirror_rect_str("0,0,600,300", wide) == "0,0,600,300"
+    # garbage / degenerate rects can never become a crop box
+    for bad in (None, "", "x", "10,10,5,5", "1,2,3"):
+        assert ai_service._mirror_rect_str(bad, wide) is None
+    # cell mirror: row-major, same row, mirrored column
+    assert [ai_service._mirror_cell_index(wide, i) for i in range(6)] == [2, 1, 0, 5, 4, 3]
+    assert [ai_service._mirror_cell_index(tall, i) for i in range(6)] == [1, 0, 3, 2, 5, 4]
+    # cell mirror agrees with the rect mirror of the overlapping grid boxes
+    for size in (wide, tall):
+        boxes = ai_service._grid_boxes(size)
+        for i, box in enumerate(boxes):
+            mirrored = ai_service._mirror_cell_index(size, i)
+            rect = ",".join(str(v) for v in box)
+            assert ai_service._mirror_rect_str(rect, size) == \
+                ",".join(str(v) for v in boxes[mirrored])
+
+
+def _twin_damages(box="360,120,600,300"):
+    """One-sided right tail-light finding (grid-cell box) + an unrelated graffio."""
+    return [
+        {"damage_type": "rottura", "severity": "grave", "zone": "posteriore",
+         "description": "[DA VERIFICARE] fanale posteriore destro crepato",
+         "confidence": 0.5, "needs_review": True, "bounding_box": box},
+        {"damage_type": "graffio", "severity": "lieve", "zone": "posteriore",
+         "description": "graffio sul portellone", "confidence": 1.0,
+         "needs_review": False, "bounding_box": None},
+    ]
+
+
+def test_twin_recheck_trigger_logic():
+    """Fires only for a light finding naming exactly ONE side, with a box, when
+    the opposite side's light is not already covered."""
+    one_sided, other = _twin_damages()
+    target = ai_service._twin_recheck_target([other, one_sided])
+    assert target is not None
+    trigger, opp = target
+    assert trigger is one_sided
+    assert opp == "sinistr"
+    # does NOT fire when both sides are already covered
+    left = {**one_sided, "description": "fanale posteriore sinistro spaccato"}
+    assert ai_service._twin_recheck_target([one_sided, left]) is None
+    # does NOT fire on non-light damage, even one-sided with a box
+    door = {**other, "description": "portiera sinistra ammaccata", "bounding_box": "0,0,10,10"}
+    assert ai_service._twin_recheck_target([door]) is None
+    # no bounding_box on any same-side light finding -> nothing to mirror -> skip
+    assert ai_service._twin_recheck_target([{**one_sided, "bounding_box": None}]) is None
+    # a description naming BOTH sides is not a one-sided trigger
+    both = {**one_sided, "description": "fanali posteriori sinistro e destro opachi"}
+    assert ai_service._twin_recheck_target([both]) is None
+
+
+def test_twin_light_recheck_appends_flagged_light_finding(monkeypatch):
+    """The mirrored-region recheck appends ONLY light findings, forced
+    needs_review at confidence <= 0.4, boxed at the mirrored grid cell; the
+    non-light finding from the same recheck reply is dropped and the existing
+    findings are untouched. Exactly ONE extra call."""
+    from PIL import Image
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: Image.new("RGB", (600, 300), "gray"))
+    monkeypatch.setattr(ai_service, "_reference_image_path", lambda *a, **k: None)
+    damages = _twin_damages()
+    reply = (
+        '{"damages": ['
+        '{"damage_type": "crepa", "severity": "grave", "componente": "fanale posteriore",'
+        ' "description": "lente del fanale con ampia zona bianca, crepata"},'
+        '{"damage_type": "graffio", "severity": "moderato", "componente": "portellone",'
+        ' "description": "graffio sul portellone"}]}'
+    )
+    client = _consolidate_fake_client(reply)
+    photo = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="retro")
+    out = ai_service._twin_light_recheck(client, "gpt-4o-mini", photo, "scudo", damages)
+    assert len(client.chat.completions.calls) == 1  # at most ONE extra call
+    assert out[:2] == damages                       # originals never altered
+    assert len(out) == 3                            # non-light recheck finding dropped
+    twin = out[2]
+    assert twin["needs_review"] is True
+    assert twin["confidence"] <= 0.4
+    assert twin["description"].startswith("[DA VERIFICARE]")
+    assert "fanale" in twin["description"].lower()
+    assert twin["zone"] == "posteriore"
+    # trigger box "360,120,600,300" = cell idx 5 of (600,300) -> mirrored cell idx 3
+    assert twin["bounding_box"] == "0,120,240,300"
+
+
+def test_twin_light_recheck_failure_keeps_list_unchanged(monkeypatch):
+    """Any exception inside the recheck (here: the LLM call) degrades to the
+    unmodified damage list — the recheck may never break the analysis."""
+    from PIL import Image
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: Image.new("RGB", (600, 300), "gray"))
+    monkeypatch.setattr(ai_service, "_reference_image_path", lambda *a, **k: None)
+
+    class BoomCompletions:
+        def create(self, **kwargs):
+            raise RuntimeError("boom-twin")
+
+    class BoomChat:
+        completions = BoomCompletions()
+
+    class BoomClient:
+        chat = BoomChat()
+
+    damages = _twin_damages()
+    photo = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="retro")
+    out = ai_service._twin_light_recheck(BoomClient(), "gpt-4o-mini", photo, "scudo", damages)
+    assert out == damages
+
+
+def test_twin_light_recheck_gating(monkeypatch):
+    """Scooters (no reference vehicle type) and side photos never trigger the
+    recheck — gated out before any image work or LLM call."""
+    calls = {"n": 0}
+    monkeypatch.setattr(ai_service, "_pil_from_source",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or None)
+    damages = _twin_damages()
+    photo = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="retro")
+    assert ai_service._twin_light_recheck(None, "m", photo, "piaggio", damages) == damages
+    photo_side = SimpleNamespace(file_path="x.jpg", image_data=None, angle_label="lato_destro")
+    assert ai_service._twin_light_recheck(None, "m", photo_side, "scudo", damages) == damages
+    assert calls["n"] == 0
+
+
 def test_consolidate_without_grid_stays_text_only():
     """No photo (or an undecodable one) -> exactly today's behavior: text-only
     prompt, no image part, no 'celle' request, boxes untouched."""

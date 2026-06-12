@@ -52,6 +52,7 @@ DEVI esaminare ENTRAMBI i fari da vicino. SEGNALA un danno se vedi UNO QUALSIASI
 - segno di impatto evidente (graffio profondo che attraversa la lente)
 NON segnalare: riflesso di luce, polvere, sporco superficiale, condensa lieve, linee di design del faro, bordi/cornici normali.
 IMPORTANTE: se vedi UN faro chiaramente rotto/spaccato/forato è un danno reale — NON metterlo come "ok" per prudenza. Distingui un faro integro da uno con frammento mancante guardando se il colore della lente è continuo o se appare uno spazio scuro/nero non previsto dal design.
+ASPETTO LENTE (indizio): nel RIFERIMENTO integro la lente del faro è liscia, trasparente e uniforme. Se nell'immagine da ispezionare la lente appare frantumata, fortemente opacizzata/lattiginosa o lascia l'interno del faro esposto, la lente è rotta o mancante: segnala "danno" nella checklist, MAI "ok". Applica questo confronto a CIASCUNO dei due fari, indipendentemente l'uno dall'altro.
 
 === ISPEZIONE PARAURTI INFERIORE (regole anti-falso-positivo) ===
 Il sotto-paraurti è spesso plastica nera non verniciata, poco illuminata. Verifica la presenza ma NON forzare la scoperta di danni.

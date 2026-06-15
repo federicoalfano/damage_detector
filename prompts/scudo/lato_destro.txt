@@ -39,8 +39,6 @@ NON saltare voci.
 - pedana_o_predellino_dx                    (opzionale)
 - ruota_anteriore_dx                        (cerchio + pneumatico)
 - ruota_posteriore_dx                       (cerchio + pneumatico)
-- copricerchi_anteriore_dx                  (opzionale)
-- copricerchi_posteriore_dx                 (opzionale)
 - indicatore_laterale_dx                    (freccia laterale, se presente)
 - antenna_laterale                          (opzionale)
 
@@ -89,6 +87,6 @@ ogni componente presente nel RIFERIMENTO ma assente o frammentato nella foto da 
 Zone: per questa foto del lato destro usa SEMPRE "zone": "laterale_destro".
 
 === FORMATO RISPOSTA (SOLO un oggetto JSON, niente markdown, niente testo prima/dopo) ===
-{"checklist": {"specchietto_dx": "ok|danno|mancante|non_visibile|non_presente", "porta_anteriore_dx": "...", "maniglia_porta_anteriore_dx": "...", "porta_scorrevole_o_posteriore_dx": "...", "maniglia_porta_scorrevole_dx": "...", "vetro_anteriore_dx": "...", "vetri_laterali_posteriori_dx": "...", "parafango_anteriore_dx": "...", "parafango_posteriore_dx": "...", "modanatura_inferiore_porta_dx": "...", "passaruota_anteriore_dx": "...", "passaruota_posteriore_dx": "...", "paraurti_anteriore_dx": "...", "paraurti_posteriore_dx": "...", "pedana_o_predellino_dx": "...", "ruota_anteriore_dx": "...", "ruota_posteriore_dx": "...", "copricerchi_anteriore_dx": "...", "copricerchi_posteriore_dx": "...", "indicatore_laterale_dx": "...", "antenna_laterale": "..."}, "damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "laterale_destro", "description": "breve descrizione in italiano, indica il componente specifico"}]}
+{"checklist": {"specchietto_dx": "ok|danno|mancante|non_visibile|non_presente", "porta_anteriore_dx": "...", "maniglia_porta_anteriore_dx": "...", "porta_scorrevole_o_posteriore_dx": "...", "maniglia_porta_scorrevole_dx": "...", "vetro_anteriore_dx": "...", "vetri_laterali_posteriori_dx": "...", "parafango_anteriore_dx": "...", "parafango_posteriore_dx": "...", "modanatura_inferiore_porta_dx": "...", "passaruota_anteriore_dx": "...", "passaruota_posteriore_dx": "...", "paraurti_anteriore_dx": "...", "paraurti_posteriore_dx": "...", "pedana_o_predellino_dx": "...", "ruota_anteriore_dx": "...", "ruota_posteriore_dx": "...", "indicatore_laterale_dx": "...", "antenna_laterale": "..."}, "damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "laterale_destro", "description": "breve descrizione in italiano, indica il componente specifico"}]}
 
 Se nessun danno: {"checklist": {...}, "damages": []}

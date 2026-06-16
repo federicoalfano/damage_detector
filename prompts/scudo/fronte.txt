@@ -29,6 +29,8 @@ NON saltare voci. NON inventare componenti fuori checklist.
 === CHECKLIST FRONTE ===
 - paraurti_anteriore_superiore     (parte alta del paraurti, plastica colorata)
 - paraurti_anteriore_inferiore     (parte bassa del paraurti, plastica nera o non verniciata, "sotto-paraurti" / spoiler frontale)
+- angolo_paraurti_anteriore_sx     (spigolo/terminale SINISTRO del paraurti, dove si raccorda al passaruota anteriore — spesso il primo pezzo a rompersi/staccarsi)
+- angolo_paraurti_anteriore_dx     (spigolo/terminale DESTRO del paraurti, dove si raccorda al passaruota anteriore — spesso il primo pezzo a rompersi/staccarsi)
 - griglia_mascherina               (griglia centrale)
 - presa_aria_inferiore             (sezione aperta sotto la griglia)
 - cofano                           (cofano motore)
@@ -42,6 +44,16 @@ NON saltare voci. NON inventare componenti fuori checklist.
 - antenna                          (opzionale)
 - targa_anteriore                  (se prevista)
 - modanature_paraurti              (eventuali listelli/protezioni in plastica nera sul paraurti)
+
+=== PARAURTI: ROTTURA o PORZIONE MANCANTE (CONTROLLO PRIORITARIO) ===
+Il paraurti e i suoi spigoli/terminali (raccordo col passaruota) si ROMPONO o si STACCANO a pezzi negli urti: è uno dei danni più importanti e più spesso mancati. Controlla con cura ENTRAMBI gli angoli inferiori del paraurti (sx e dx).
+Un paraurti può essere PARZIALMENTE mancante: anche se gran parte è presente, se MANCA un ANGOLO, un TERMINALE o una SEZIONE è comunque "pezzo_mancante" (checklist: "mancante", NON "ok" e NON "danno").
+SEGNALA "pezzo_mancante" (o "rottura" se il pezzo è spaccato ma ancora attaccato) quando, rispetto al riferimento integro, vedi UNO di questi:
+- BORDO IRREGOLARE/FRASTAGLIATO o spezzato al posto del profilo liscio e continuo del paraurti;
+- CAVITÀ SCURA o STRUTTURA INTERNA esposta (traversa/assorbitore/staffe/lamiera/viti) dove il riferimento mostra plastica liscia e chiusa;
+- un pezzo che pende o è deformato/scollato dalla sua sede;
+- lo spigolo del paraurti che NON si raccorda più con passaruota/fiancata (manca il terminale).
+NON confondere con la normale plastica nera di fabbrica: quella è LISCIA, CONTINUA, UNIFORME e segue la linea della carrozzeria. Una rottura/mancanza ha contorno NETTO e IRREGOLARE e lascia vedere "dentro". Macchie o segni neri superficiali su un paraurti per il resto INTEGRO restano "graffio", NON "pezzo_mancante".
 
 === ISPEZIONE FARI (regola bilanciata) ===
 DEVI esaminare ENTRAMBI i fari da vicino. SEGNALA un danno se vedi UNO QUALSIASI di questi:
@@ -98,6 +110,6 @@ ogni componente presente nel RIFERIMENTO ma assente o frammentato nella foto da 
 Zone: per questa foto frontale usa SEMPRE "zone": "frontale".
 
 === FORMATO RISPOSTA (SOLO un oggetto JSON, niente markdown, niente testo prima/dopo) ===
-{"checklist": {"paraurti_anteriore_superiore": "ok|danno|mancante|non_visibile|non_presente", "paraurti_anteriore_inferiore": "...", "griglia_mascherina": "...", "presa_aria_inferiore": "...", "cofano": "...", "faro_anteriore_sinistro": "...", "faro_anteriore_destro": "...", "fendinebbia": "...", "parabrezza": "...", "tergicristalli": "...", "specchietto_sx": "...", "specchietto_dx": "...", "antenna": "...", "targa_anteriore": "...", "modanature_paraurti": "..."}, "damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "frontale", "description": "breve descrizione in italiano, indica il componente specifico"}]}
+{"checklist": {"paraurti_anteriore_superiore": "ok|danno|mancante|non_visibile|non_presente", "paraurti_anteriore_inferiore": "...", "angolo_paraurti_anteriore_sx": "...", "angolo_paraurti_anteriore_dx": "...", "griglia_mascherina": "...", "presa_aria_inferiore": "...", "cofano": "...", "faro_anteriore_sinistro": "...", "faro_anteriore_destro": "...", "fendinebbia": "...", "parabrezza": "...", "tergicristalli": "...", "specchietto_sx": "...", "specchietto_dx": "...", "antenna": "...", "targa_anteriore": "...", "modanature_paraurti": "..."}, "damages": [{"damage_type": "graffio|ammaccatura|crepa|rottura|pezzo_mancante|usura|sporcizia", "severity": "lieve|moderato|grave", "zone": "frontale", "description": "breve descrizione in italiano, indica il componente specifico"}]}
 
 Se nessun danno: {"checklist": {...}, "damages": []}
